@@ -127,6 +127,37 @@
 
         <div id="messages" class="messages" aria-live="polite"></div>
       </section>
+      <section class="snow-vision" id="snow-vision">
+        <div class="snow-vision-heading">
+            <div>
+                <span class="vision-eyebrow">INTERACTIVE WINTER MODE</span>
+                <h2>Snow Vision</h2>
+                <p>Move your hands and create magic.</p>
+            </div>
+            <span class="vision-tag">HAND TRACKING</span>
+        </div>
+
+        <div class="camera-stage" id="camera-stage" hidden>
+            <video id="camera-video" autoplay playsinline muted></video>
+            <canvas id="snow-canvas"></canvas>
+            <div class="camera-label" id="camera-label">
+                SHOW YOUR HANDS TO THE CAMERA
+            </div>
+        </div>
+
+        <div class="vision-controls">
+            <button id="camera-toggle" class="camera-toggle">
+                ✧ Activate Camera
+            </button>
+            <span id="camera-status">
+                Camera is off · Nothing is being captured
+            </span>
+        </div>
+
+        <div class="vision-privacy">
+            ◈ Hand tracking runs locally in your browser. Video is not uploaded or recorded.
+        </div>
+      </section>
 
       <footer class="composer-area">
         <div id="voice-status" class="voice-status" role="status" aria-live="polite">

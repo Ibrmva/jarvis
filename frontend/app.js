@@ -515,3 +515,313 @@ document.addEventListener("keydown", event => {
 checkHealth();
 loadHistory();
 setInterval(checkHealth, 15000);
+
+// =============================================
+// JARVIS SNOW VISION — HAND TRACKING ONLY
+// =============================================
+
+const cameraToggle = document.getElementById("camera-toggle");
+const cameraStage = document.getElementById("camera-stage");
+const cameraVideo = document.getElementById("camera-video");
+const snowCanvas = document.getElementById("snow-canvas");
+const cameraStatus = document.getElementById("camera-status");
+const cameraLabel = document.getElementById("camera-label");
+
+let cameraStream = null;
+let handTracker = null;
+let cameraActive = false;
+let animationFrame = null;
+let lastVideoTime = -1;
+let particles = [];
+
+const connections = [
+    [0, 1], [1, 2], [2, 3], [3, 4],
+    [0, 5], [5, 6], [6, 7], [7, 8],
+    [5, 9], [9, 10], [10, 11], [11, 12],
+    [9, 13], [13, 14], [14, 15], [15, 16],
+    [13, 17], [17, 18], [18, 19], [19, 20],
+    [0, 17]
+];
+
+async function loadHandTracker() {
+    if (handTracker) return handTracker;
+
+    cameraStatus.textContent = "Loading hand tracking model...";
+
+    const vision = await import(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14"
+    );
+
+    const fileset = await vision.FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+    );
+
+    handTracker = await vision.HandLandmarker.createFromOptions(
+        fileset,
+        {
+            baseOptions: {
+                modelAssetPath:
+                    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            numHands: 2,
+            minHandDetectionConfidence: 0.55,
+            minHandPresenceConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        }
+    );
+
+    return handTracker;
+}
+
+function resizeCanvas() {
+    const rect = cameraStage.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    snowCanvas.width = rect.width * dpr;
+    snowCanvas.height = rect.height * dpr;
+
+    const ctx = snowCanvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function createSnow(x, y, amount = 1) {
+    const count = Math.round(4 * amount);
+
+    for (let i = 0; i < count; i++) {
+        particles.push({
+            x,
+            y,
+            vx: (Math.random() - 0.5) * 3 * amount,
+            vy: -Math.random() * 2 - 0.5,
+            life: 50 + Math.random() * 30,
+            radius: 1 + Math.random() * 2.5
+        });
+    }
+
+    if (particles.length > 800) {
+        particles.splice(0, particles.length - 800);
+    }
+}
+
+function drawHands(results) {
+    const ctx = snowCanvas.getContext("2d");
+    const width = cameraStage.clientWidth;
+    const height = cameraStage.clientHeight;
+
+    ctx.clearRect(0, 0, width, height);
+
+    const hands = results.landmarks || [];
+
+    if (hands.length > 0) {
+        cameraLabel.textContent =
+            `${hands.length} HAND(S) DETECTED · CREATE MAGIC`;
+
+        hands.forEach(landmarks => {
+            const points = landmarks.map(point => ({
+                x: (1 - point.x) * width,
+                y: point.y * height
+            }));
+
+            // Draw glowing hand skeleton.
+            ctx.save();
+            ctx.strokeStyle = "rgba(170, 218, 255, 0.6)";
+            ctx.lineWidth = 1.5;
+            ctx.shadowColor = "#9edbff";
+            ctx.shadowBlur = 8;
+
+            connections.forEach(([a, b]) => {
+                ctx.beginPath();
+                ctx.moveTo(points[a].x, points[a].y);
+                ctx.lineTo(points[b].x, points[b].y);
+                ctx.stroke();
+            });
+
+            ctx.restore();
+
+            // Snow comes from fingertips.
+            [4, 8, 12, 16, 20].forEach(index => {
+                const point = points[index];
+
+                createSnow(point.x, point.y, 1.5);
+
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = "#eaf8ff";
+                ctx.shadowColor = "#8bd5ff";
+                ctx.shadowBlur = 16;
+                ctx.fill();
+            });
+
+            // Magical glow around palm.
+            const palm = points[9];
+
+            const glow = ctx.createRadialGradient(
+                palm.x, palm.y, 2,
+                palm.x, palm.y, 45
+            );
+
+            glow.addColorStop(0, "rgba(139,205,255,0.3)");
+            glow.addColorStop(1, "rgba(139,205,255,0)");
+
+            ctx.fillStyle = glow;
+            ctx.fillRect(
+                palm.x - 45,
+                palm.y - 45,
+                90,
+                90
+            );
+        });
+    } else {
+        cameraLabel.textContent = "SHOW YOUR HANDS TO THE CAMERA";
+    }
+
+    // Ambient falling snow.
+    if (Math.random() < 0.4) {
+        createSnow(Math.random() * width, -5, 0.4);
+    }
+
+    // Animate particles.
+    particles = particles.filter(p => p.life > 0);
+
+    particles.forEach(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.02;
+        p.life--;
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+
+        ctx.fillStyle =
+            `rgba(220,242,255,${Math.min(1, p.life / 40)})`;
+
+        ctx.shadowColor = "#9edbff";
+        ctx.shadowBlur = 10;
+        ctx.fill();
+    });
+}
+
+function visionLoop() {
+    if (!cameraActive) return;
+
+    if (
+        cameraVideo.readyState >= 2 &&
+        cameraVideo.currentTime !== lastVideoTime
+    ) {
+        lastVideoTime = cameraVideo.currentTime;
+
+        try {
+            const results = handTracker.detectForVideo(
+                cameraVideo,
+                performance.now()
+            );
+
+            drawHands(results);
+        } catch (error) {
+            console.error("Hand tracking error:", error);
+        }
+    }
+
+    animationFrame = requestAnimationFrame(visionLoop);
+}
+
+async function activateCamera() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Camera access is not available in this browser.");
+    }
+
+    cameraToggle.disabled = true;
+
+    try {
+        cameraStatus.textContent = "Requesting camera permission...";
+
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+                facingMode: "user",
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            }
+        });
+
+        cameraVideo.srcObject = cameraStream;
+        await cameraVideo.play();
+
+        cameraStage.hidden = false;
+        resizeCanvas();
+
+        await loadHandTracker();
+
+        cameraActive = true;
+        lastVideoTime = -1;
+        particles = [];
+
+        cameraToggle.textContent = "✧ Deactivate Camera";
+        cameraToggle.classList.add("active");
+
+        cameraStatus.textContent =
+            "Camera active · Hand tracking only";
+
+        visionLoop();
+
+    } catch (error) {
+        stopCamera();
+        throw error;
+
+    } finally {
+        cameraToggle.disabled = false;
+    }
+}
+
+function stopCamera() {
+    cameraActive = false;
+
+    if (animationFrame) {
+        cancelAnimationFrame(animationFrame);
+    }
+
+    animationFrame = null;
+
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+    }
+
+    cameraStream = null;
+
+    cameraVideo.pause();
+    cameraVideo.srcObject = null;
+
+    cameraStage.hidden = true;
+    particles = [];
+
+    const ctx = snowCanvas.getContext("2d");
+    ctx.clearRect(0, 0, snowCanvas.width, snowCanvas.height);
+
+    cameraToggle.textContent = "✧ Activate Camera";
+    cameraToggle.classList.remove("active");
+
+    cameraStatus.textContent =
+        "Camera is off · Nothing is being captured";
+}
+
+cameraToggle.addEventListener("click", async () => {
+    if (cameraActive) {
+        stopCamera();
+        return;
+    }
+
+    try {
+        await activateCamera();
+    } catch (error) {
+        console.error(error);
+        cameraStatus.textContent = error.message;
+    }
+});
+
+window.addEventListener("resize", () => {
+    if (cameraActive) resizeCanvas();
+});
+
+window.addEventListener("pagehide", stopCamera);
