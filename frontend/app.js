@@ -24,6 +24,7 @@ const statusDot = document.getElementById("status-dot");
 const connectionLabel = document.getElementById("connection-label");
 const modelLabel = document.getElementById("model-label");
 const modelMode = document.getElementById("model-mode");
+const recentChatsEl = document.getElementById("recent-chats");
 
 let audioContext = null;
 let mediaStream = null;
@@ -183,10 +184,12 @@ async function checkHealth() {
 }
 
 async function loadHistory() {
+  const requestedSessionId = sessionId;
   try {
-    const response = await fetch(`/api/history/${sessionId}`);
-    if (!response.ok) return;
+    const response = await fetch(`/api/history/${requestedSessionId}`);
+    if (!response.ok) throw new Error(`Could not load conversation (${response.status}).`);
     const data = await response.json();
+    if (requestedSessionId !== sessionId) return;
 
     if (Array.isArray(data.messages) && data.messages.length) {
       welcomeEl.style.display = "none";
@@ -197,6 +200,60 @@ async function loadHistory() {
   } catch (error) {
     console.error("Could not load history:", error);
   }
+}
+
+function renderRecentChats(sessions) {
+  recentChatsEl.replaceChildren();
+
+  if (!sessions.length) {
+    const emptyState = document.createElement("div");
+    emptyState.className = "recent-chats-empty";
+    emptyState.textContent = "No conversations yet";
+    recentChatsEl.append(emptyState);
+    return;
+  }
+
+  sessions.forEach(session => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `conversation-item${session.session_id === sessionId ? " active" : ""}`;
+    button.textContent = session.title || "Untitled conversation";
+    button.title = button.textContent;
+    button.setAttribute("aria-current", session.session_id === sessionId ? "page" : "false");
+    button.addEventListener("click", () => openConversation(session.session_id));
+    recentChatsEl.append(button);
+  });
+}
+
+async function refreshRecentChats() {
+  try {
+    const response = await fetch("/api/sessions");
+    if (!response.ok) throw new Error(`Could not load recent conversations (${response.status}).`);
+    const data = await response.json();
+    renderRecentChats(Array.isArray(data.sessions) ? data.sessions : []);
+  } catch (error) {
+    console.error("Could not load recent conversations:", error);
+    recentChatsEl.replaceChildren();
+    const errorState = document.createElement("div");
+    errorState.className = "recent-chats-empty";
+    errorState.textContent = "Could not load conversations";
+    recentChatsEl.append(errorState);
+  }
+}
+
+async function openConversation(nextSessionId) {
+  if (isBusy || nextSessionId === sessionId) return;
+
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  sessionId = nextSessionId;
+  localStorage.setItem(SESSION_KEY, sessionId);
+  messagesEl.replaceChildren();
+  welcomeEl.style.display = "flex";
+  input.value = "";
+  setAssistantState("idle", "Standing by for your command");
+  setVoiceStatus("Microphone ready · English and Russian");
+  await loadHistory();
+  await refreshRecentChats();
 }
 
 async function sendMessage(message, options = {}) {
@@ -239,7 +296,7 @@ async function sendMessage(message, options = {}) {
 
     addMessage("assistant", data.reply, data.model, data.tier, data.routing_reason);
     setVoiceStatus(fromVoice ? "Voice message sent · JARVIS replied" : "Ready · English and Russian voice input", "success");
-    speakReply(data.reply);
+    if (fromVoice) speakReply(data.reply);
   } catch (error) {
     hideTyping();
     addMessage("assistant", `I encountered a problem: ${error.message}`);
@@ -250,6 +307,7 @@ async function sendMessage(message, options = {}) {
     if (!("speechSynthesis" in window) || window.speechSynthesis.speaking === false) {
       setAssistantState("idle", "Standing by for your command");
     }
+    await refreshRecentChats();
     checkHealth();
   }
 }
@@ -297,6 +355,7 @@ function startNewConversation() {
   setVoiceStatus("Microphone ready · English and Russian");
   input.value = "";
   input.focus();
+  refreshRecentChats();
 }
 
 document.getElementById("new-chat").addEventListener("click", startNewConversation);
@@ -313,6 +372,7 @@ document.getElementById("clear-chat").addEventListener("click", async () => {
     welcomeEl.style.display = "flex";
     setAssistantState("idle", "Standing by for your command");
     setVoiceStatus("Conversation cleared");
+    await refreshRecentChats();
   } catch (error) {
     setVoiceStatus(error.message, "error");
   }
@@ -514,6 +574,7 @@ document.addEventListener("keydown", event => {
 
 checkHealth();
 loadHistory();
+refreshRecentChats();
 setInterval(checkHealth, 15000);
 
 // =============================================

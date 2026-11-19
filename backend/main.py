@@ -20,6 +20,7 @@ from backend.database import (
     clear_history,
     get_history,
     get_display_history,
+    get_recent_sessions,
     initialize_database,
     save_message,
 )
@@ -147,6 +148,11 @@ async def history(session_id: str):
         ) from exc
 
     return {"messages": get_display_history(session_id)}
+
+
+@app.get("/api/sessions")
+async def recent_sessions():
+    return {"sessions": get_recent_sessions()}
 
 
 @app.post("/api/transcribe")

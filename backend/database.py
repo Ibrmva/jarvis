@@ -39,6 +39,23 @@ def get_display_history(session_id: str, limit: int = 100) -> list[dict]:
         ).fetchall()
     return [dict(row) for row in rows]
 
+def get_recent_sessions(limit: int = 50) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """SELECT session_id,
+                      (SELECT content FROM messages AS first_message
+                       WHERE first_message.session_id = messages.session_id
+                         AND first_message.role = 'user'
+                       ORDER BY first_message.id ASC LIMIT 1) AS title,
+                      MAX(created_at) AS updated_at
+               FROM messages
+               GROUP BY session_id
+               ORDER BY MAX(id) DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
 def save_message(session_id: str, role: str, content: str, model: str | None = None) -> None:
     with get_connection() as conn:
         conn.execute(
