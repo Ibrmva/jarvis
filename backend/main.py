@@ -35,6 +35,7 @@ from backend.speech_recognition import (
     transcribe_audio,
     SpeechRecognitionError,
 )
+from backend.command_executor import execute_command
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis")
@@ -50,7 +51,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=f"{JARVIS_NAME} Hybrid-Ready Assistant",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -207,6 +208,39 @@ async def chat(request: ChatRequest):
             detail="Message cannot be empty.",
         )
 
+    # Save the user's command.
+    save_message(request.session_id, "user", user_message)
+
+    # Execute recognized macOS actions before calling the AI model.
+    command_result = await run_in_threadpool(
+        execute_command,
+        user_message,
+    )
+
+    if command_result is not None:
+        reply = command_result["reply"]
+
+        save_message(
+            request.session_id,
+            "assistant",
+            reply,
+            "macOS",
+        )
+
+        logger.info(
+            "macOS action: %s",
+            command_result["action"],
+        )
+
+        return ChatResponse(
+            session_id=request.session_id,
+            reply=reply,
+            model="macOS",
+            tier="action",
+            routing_reason=command_result["action"],
+        )
+
+    # Normal AI conversation.
     try:
         available = await get_available_models()
         route = choose_model(user_message, request.model_mode)
@@ -237,8 +271,6 @@ async def chat(request: ChatRequest):
                         f"Run: ollama pull {FAST_MODEL}"
                     ),
                 )
-
-        save_message(request.session_id, "user", user_message)
 
         history_items = get_history(
             request.session_id,
