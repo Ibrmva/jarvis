@@ -355,6 +355,55 @@ kbd {
   margin-top: 29px;
 }
 
+.recent-chats-section {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 100px;
+  margin-top: 20px;
+}
+
+.recent-chats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.conversation-item {
+  display: block;
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 36px;
+  overflow: hidden;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #aab7ca;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.conversation-item:hover,
+.conversation-item.active {
+  border-color: var(--line);
+  background: rgba(65,103,163,.16);
+  color: #e1ebfb;
+}
+
+.recent-chats-empty {
+  padding: 8px 10px;
+  color: var(--dim);
+  font-size: 10px;
+}
+
 .section-label {
   margin: 0 0 12px 3px;
   color: #71809a;

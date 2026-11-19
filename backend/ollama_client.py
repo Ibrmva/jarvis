@@ -36,8 +36,9 @@ async def generate_reply(history: list[dict], model: str) -> str:
         "model": model,
         "messages": messages,
         "stream": False,
+        "think": True,
         "keep_alive": OLLAMA_KEEP_ALIVE,
-        "options": {"temperature": 0.7, "num_ctx": NUM_CTX, "num_predict": 640},
+        "options": {"temperature": 0.7, "num_ctx": NUM_CTX, "num_predict": 2048},
     }
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
