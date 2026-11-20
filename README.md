@@ -1,54 +1,33 @@
-# JARVIS
+# JARVIS — Phase 2: Intelligent Local Model Routing
 
-JARVIS is a local-first personal AI assistant for macOS. It provides a web interface over a FastAPI backend and routes requests to local Ollama models.
+JARVIS is a local-first personal AI assistant. Phase 2 adds automatic routing between two Ollama models while keeping a single SQLite conversation history.
 
-**Current version:** `0.4.0`
+## Features
+- Auto mode: routes everyday requests to `qwen3:1.7b` and coding/longer reasoning requests to `qwen3:4b`.
+- Manual Fast and Advanced modes in the interface.
+- Both models receive the same recent conversation history; switching models does not create a new chat.
+- SQLite migration adds a `model` column without deleting existing messages.
+- `OLLAMA_KEEP_ALIVE=0` asks Ollama to unload a model after each response to reduce memory pressure. This can make the next response slower because the model must load again.
+- No cloud API is called in this phase. Cloud routing will be added only as an opt-in feature with an explicit privacy/consent step.
 
-## Current features
+## MacBook setup
 
-- **Adaptive local model routing**: choose Auto, Fast, or Advanced response mode.
-  - Fast: `qwen3:1.7b`
-  - Advanced: `qwen3:4b`
-  - Auto: routing is based on request length, coding keywords, and code blocks.
-- **Persistent conversations**: messages are stored in a local SQLite database, with a shared history across model changes and a recent-conversation sidebar.
-- **Voice input**: browser microphone recording is transcribed locally with `whisper.cpp` for English and Russian.
-- **Voice output**: assistant replies can be read aloud with the browser speech synthesis API.
-- **macOS actions**: predefined requests can open supported applications and websites or run Google and YouTube searches.
-- **Snow Vision**: browser-local hand tracking draws interactive snow particles from fingertips using MediaPipe and the device camera. Camera video is not uploaded or recorded.
-- **Local status dashboard**: the interface reports Ollama and configured-model availability.
-
-## macOS setup
-
-### 1. Install prerequisites
-
-Install Ollama and `whisper.cpp`:
+Keep your existing project as a backup before replacing files. Extract this ZIP and copy the contents of `jarvis_local_phase1/` into your project folder, or use the extracted folder as the new project.
 
 ```bash
-brew install ollama whisper-cpp
-ollama serve
-```
-
-Keep Ollama running in the background, or open the Ollama app.
-
-### 2. Create a Python environment
-
-```bash
-cd /path/to/jarvis
-python3 -m venv .venv
+cd ~/Downloads/jarvis_local_phase1
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env  # only if you do not already have .env
 ```
 
-### 3. Configure the environment
-
-Create `.env` in the project root. The following values match the defaults:
+If `.env` already exists, edit it and make sure it contains:
 
 ```env
 JARVIS_NAME=JARVIS
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 FAST_MODEL=qwen3:1.7b
 ADVANCED_MODEL=qwen3:4b
-DEFAULT_MODEL_MODE=auto
 DATABASE_PATH=./data/jarvis.db
 MAX_HISTORY_MESSAGES=20
 REQUEST_TIMEOUT_SECONDS=240
@@ -56,7 +35,7 @@ OLLAMA_KEEP_ALIVE=0
 NUM_CTX=4096
 ```
 
-Pull the language models:
+Install both models if needed:
 
 ```bash
 ollama pull qwen3:1.7b
@@ -64,83 +43,30 @@ ollama pull qwen3:4b
 ollama list
 ```
 
-The repository includes the Whisper model at:
-
-```text
-models/whisper/ggml-base-q5_1.bin
-```
-
-### 4. Start JARVIS
+Start JARVIS:
 
 ```bash
-source .venv/bin/activate
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Open <http://127.0.0.1:8000>.
+Open http://127.0.0.1:8000
 
-Microphone and camera access use browser permissions. Use Safari or a recent Chrome-based browser and allow access when prompted.
+## Test routing
 
-## Using JARVIS
+1. Keep `Auto — JARVIS decides` selected.
+2. Send: `What is the difference between a list and a tuple in Python?` Expected route: `qwen3:1.7b`.
+3. Send: `Review this Python code and explain how to refactor it for better performance: ```python
+def f(x): return sorted(set(x))
+``` ` Expected route: `qwen3:4b`.
+4. Select `Fast` manually and send a complex request. It should still use `qwen3:1.7b`.
+5. Select `Advanced` manually. It should use `qwen3:4b` or clearly tell you if it is not installed.
+6. Ask a follow-up referring to the previous answer. The conversation should remain continuous after a model change.
 
-- Use the sidebar to switch between `Auto`, `Fast`, and `Advanced`.
-- Press `Cmd+K` or use **New conversation** to start a new conversation.
-- Use the microphone button to record up to 60 seconds of speech. Transcription is currently limited to English and Russian.
-- Use **Clear chat** to remove the current conversation from SQLite.
-- Open **Snow Vision** and activate the camera for fingertip particle tracking.
-
-## macOS commands
-
-The following predefined, safe actions are handled before the request is sent to an Ollama model:
-
-- Open an application: `open Telegram`, `запусти Safari`, `open Visual Studio Code`
-- Open a website: `open YouTube`, `открой Google`, `open GitHub`
-- Search YouTube: `search YouTube lo-fi music`
-- Search Google: `найди в гугл weather`
-
-Supported applications and websites are listed in `backend/command_executor.py`. Unknown requests fall back to normal AI chat.
-
-## API
-
-- `GET /` - web interface
-- `GET /api/health` - Ollama and model status
-- `GET /api/models` - available response modes and model installation status
-- `GET /api/history/{session_id}` - conversation history
-- `GET /api/sessions` - recent conversations
-- `POST /api/chat` - send a chat message
-- `POST /api/transcribe` - transcribe uploaded WAV, MP3, FLAC, or OGG audio
-- `DELETE /api/history/{session_id}` - clear one conversation
-
-## Memory and performance
-
-`OLLAMA_KEEP_ALIVE=0` asks Ollama to unload a model after each response. This reduces memory pressure between requests but may add model loading latency.
-
-`NUM_CTX=4096` controls the context window. `MAX_HISTORY_MESSAGES` limits the number of recent messages included in each model request. Increasing either value may require more RAM.
-
-## Project structure
-
-```text
-backend/
-  main.py                 FastAPI application and API routes
-  config.py               Environment configuration and system prompt
-  database.py             SQLite conversation storage
-  model_router.py         Heuristic Fast/Advanced routing
-  ollama_client.py        Ollama health and chat integration
-  speech_recognition.py   whisper.cpp transcription
-  command_executor.py     Predefined macOS actions
-frontend/
-  index.html              JARVIS interface
-  app.js                  Chat, voice, history, and Snow Vision behavior
-  styles.css              Interface styles
-models/
-  whisper/                Local Whisper speech model
-data/                     Local SQLite database, created at runtime
-```
+## Important memory note
+This version prioritizes memory safety by setting `keep_alive=0`. It unloads the model after each response, which saves RAM between requests but adds model-load latency. If the machine remains comfortable in Activity Monitor, you can later test `OLLAMA_KEEP_ALIVE=30s`.
 
 ## Current limitations
-
-- The model router uses keyword, code, and length heuristics; it is not a learned classifier.
-- Advanced routing falls back to the Fast model when the Advanced model is unavailable. Explicit Advanced mode returns an error if it is not installed.
-- macOS automation is limited to the predefined websites, applications, and searches in `backend/command_executor.py`.
-- Voice transcription supports English and Russian and requires `whisper-cli` plus the bundled Whisper model.
-- There is no wake-word listener or always-on assistant mode yet.
+- Router uses transparent keyword/length/code heuristics, not a separate AI classifier.
+- No automatic RAM telemetry yet.
+- No cloud provider integration yet; cloud support is a later opt-in milestone.
+- No voice or macOS automation yet.
