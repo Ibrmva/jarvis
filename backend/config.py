@@ -30,6 +30,17 @@ REQUEST_TIMEOUT_SECONDS = float(
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "0")
 NUM_CTX = int(os.getenv("NUM_CTX", "4096"))
 
+# Speech-to-text. The GGML weights are not committed; scripts/fetch_models.sh
+# downloads them. Point WHISPER_MODEL_PATH elsewhere to use a different model,
+# and WHISPER_EXECUTABLE to override the whisper-cli lookup.
+WHISPER_MODEL_PATH = Path(
+    os.getenv(
+        "WHISPER_MODEL_PATH",
+        str(PROJECT_ROOT / "models" / "whisper" / "ggml-base-q5_1.bin"),
+    )
+)
+WHISPER_EXECUTABLE = os.getenv("WHISPER_EXECUTABLE", "").strip()
+
 SYSTEM_PROMPT = f"""
 You are {JARVIS_NAME}, a smart personal AI assistant.
 

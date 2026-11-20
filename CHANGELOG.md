@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — voice input diagnostics
+
+### Fixed
+
+- **`Whisper model not found: …` was a dead end.** The weights are no longer in git, so a fresh clone had no way to know how to get them. The error now names `scripts/fetch_models.sh` and `WHISPER_MODEL_PATH`; the `whisper-cli` error names the per-OS install and `WHISPER_EXECUTABLE`. Both are covered by `tests/test_speech.py`, which drives a stand-in `whisper-cli` through the real two-pass (detect language → transcribe) flow.
+
+### Added
+
+- `WHISPER_MODEL_PATH` and `WHISPER_EXECUTABLE` settings (config + `.env.example` + README table) so a different GGML model or a non-PATH binary is a config change, not a code edit.
+- README troubleshooting section for the three voice-input failure modes.
+
 ## Unreleased — hardening pass
 
 ### Fixed

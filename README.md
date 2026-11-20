@@ -63,6 +63,14 @@ All settings come from `.env` (see `.env.example`); the defaults live in `backen
 | `REQUEST_TIMEOUT_SECONDS` | `240` | `/api/chat` timeout |
 | `OLLAMA_KEEP_ALIVE` | `0` | model residency after a reply |
 | `NUM_CTX` | `4096` | context window |
+| `WHISPER_MODEL_PATH` | `./models/whisper/ggml-base-q5_1.bin` | GGML weights used by `/api/transcribe` |
+| `WHISPER_EXECUTABLE` | *(PATH lookup)* | explicit `whisper-cli` binary, overrides `PATH` |
+
+## Troubleshooting
+
+- **`Whisper model not found: …/models/whisper/ggml-base-q5_1.bin`** on voice input — the weights are not in git. Run `./scripts/fetch_models.sh` (57 MB, checksum-verified), or point `WHISPER_MODEL_PATH` at an existing GGML `.bin`.
+- **`whisper-cli was not found on PATH`** — install whisper.cpp (`brew install whisper.cpp` on macOS, build from source on Linux) or set `WHISPER_EXECUTABLE` to the binary's full path.
+- **`JARVIS currently supports only English and Russian`** — the transcriber runs a language-detection pass first and refuses anything outside `ALLOWED_LANGUAGES` in `backend/speech_recognition.py`.
 
 ## Tests
 
