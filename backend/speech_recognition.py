@@ -5,9 +5,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from backend.config import PROJECT_ROOT
+from backend.config import PROJECT_ROOT, WHISPER_EXECUTABLE, WHISPER_MODEL_PATH
 
-WHISPER_MODEL = PROJECT_ROOT / "models" / "whisper" / "ggml-base-q5_1.bin"
+WHISPER_MODEL = WHISPER_MODEL_PATH
+
+FETCH_HINT = (
+    "Install the model with ./scripts/fetch_models.sh "
+    "(or set WHISPER_MODEL_PATH to an existing ggml .bin file)."
+)
 
 SUPPORTED_FORMATS = {".wav", ".mp3", ".flac", ".ogg"}
 MAX_AUDIO_SIZE = 20 * 1024 * 1024
@@ -19,6 +24,14 @@ class SpeechRecognitionError(RuntimeError):
 
 
 def get_whisper_executable() -> str:
+    if WHISPER_EXECUTABLE:
+        configured = Path(WHISPER_EXECUTABLE).expanduser()
+        if configured.is_file():
+            return str(configured)
+        raise SpeechRecognitionError(
+            f"WHISPER_EXECUTABLE points at {configured}, which does not exist."
+        )
+
     executable = shutil.which("whisper-cli")
 
     if not executable:
@@ -28,7 +41,9 @@ def get_whisper_executable() -> str:
 
     if not executable:
         raise SpeechRecognitionError(
-            "whisper-cli was not found. Install it using: brew install whisper.cpp"
+            "whisper-cli was not found on PATH. macOS: brew install whisper.cpp. "
+            "Linux: build https://github.com/ggerganov/whisper.cpp and put "
+            "whisper-cli on PATH, or set WHISPER_EXECUTABLE to its full path."
         )
 
     return executable
@@ -111,7 +126,7 @@ def transcribe_audio(audio_data: bytes, filename: str) -> dict:
 
     if not WHISPER_MODEL.is_file():
         raise SpeechRecognitionError(
-            f"Whisper model not found: {WHISPER_MODEL}"
+            f"Whisper model not found: {WHISPER_MODEL}. {FETCH_HINT}"
         )
 
     executable = get_whisper_executable()

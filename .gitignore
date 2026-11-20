@@ -1,6 +1,13 @@
 .venv/
+venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .env
 data/
 .DS_Store
+
+# Whisper GGML weights are fetched with scripts/fetch_models.sh, not committed.
+models/**/*.bin
+models/**/*.gguf
+*.bin.part
