@@ -48,6 +48,10 @@ APPLICATIONS = {
     "zoom": "zoom.us",
 }
 
+RUSSIAN_COMMAND = re.compile(
+    r"^(?:открой|открыть|запусти|запустить|найди|поищи)\b"
+)
+
 
 def open_website(url: str) -> None:
     subprocess.run(
@@ -73,6 +77,7 @@ def execute_command(message: str):
 
     text = message.strip().lower()
     text = re.sub(r"[.!?]+$", "", text).strip()
+    russian = bool(RUSSIAN_COMMAND.match(text))
 
     open_match = re.match(
         r"^(?:открой|открыть|запусти|запустить|open|launch)\s+(.+)$",
@@ -87,12 +92,20 @@ def execute_command(message: str):
             try:
                 open_website(WEBSITES[target])
                 return {
-                    "reply": f"Открываю {target}.",
+                    "reply": (
+                        f"Открываю {target}."
+                        if russian
+                        else f"Opening {target}."
+                    ),
                     "action": "open_website",
                 }
             except (subprocess.SubprocessError, OSError) as exc:
                 return {
-                    "reply": f"Не удалось открыть {target}: {exc}",
+                    "reply": (
+                        f"Не удалось открыть {target}: {exc}"
+                        if russian
+                        else f"Could not open {target}: {exc}"
+                    ),
                     "action": "error",
                 }
 
@@ -101,14 +114,25 @@ def execute_command(message: str):
             try:
                 open_application(app_name)
                 return {
-                    "reply": f"Запускаю {app_name}.",
+                    "reply": (
+                        f"Запускаю {app_name}."
+                        if russian
+                        else f"Launching {app_name}."
+                    ),
                     "action": "open_application",
                 }
             except (subprocess.SubprocessError, OSError) as exc:
                 return {
                     "reply": (
-                        f"Не удалось запустить {app_name}. "
-                        "Проверь, установлено ли приложение."
+                        (
+                            f"Не удалось запустить {app_name}. "
+                            "Проверь, установлено ли приложение."
+                        )
+                        if russian
+                        else (
+                            f"Could not launch {app_name}. "
+                            "Check whether it is installed."
+                        )
                     ),
                     "action": "error",
                 }
@@ -128,12 +152,20 @@ def execute_command(message: str):
         try:
             open_website(url)
             return {
-                "reply": f"Ищу на YouTube: {query}.",
+                "reply": (
+                    f"Ищу на YouTube: {query}."
+                    if russian
+                    else f"Searching YouTube for: {query}."
+                ),
                 "action": "youtube_search",
             }
         except (subprocess.SubprocessError, OSError):
             return {
-                "reply": "Не удалось открыть поиск YouTube.",
+                "reply": (
+                    "Не удалось открыть поиск YouTube."
+                    if russian
+                    else "Could not open YouTube search."
+                ),
                 "action": "error",
             }
 
@@ -150,12 +182,20 @@ def execute_command(message: str):
         try:
             open_website(url)
             return {
-                "reply": f"Ищу в Google: {query}.",
+                "reply": (
+                    f"Ищу в Google: {query}."
+                    if russian
+                    else f"Searching Google for: {query}."
+                ),
                 "action": "google_search",
             }
         except (subprocess.SubprocessError, OSError):
             return {
-                "reply": "Не удалось открыть Google.",
+                "reply": (
+                    "Не удалось открыть Google."
+                    if russian
+                    else "Could not open Google."
+                ),
                 "action": "error",
             }
 
