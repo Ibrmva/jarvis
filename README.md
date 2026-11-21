@@ -24,6 +24,31 @@ JARVIS is a local-first personal AI assistant. Phase 2 routes requests between t
 
 ## Setup
 
+The setup script supports macOS and Linux. It can clone the repository, create
+the Python environment, install dependencies, configure `.env`, install Ollama
+and whisper.cpp through Homebrew when available, check/start Ollama, pull the
+configured models, fetch the Whisper model, and launch JARVIS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ibrmva/jarvis/main/scripts/setup.sh | bash
+```
+
+By default, this clones into `./jarvis`. To choose another directory, set
+`JARVIS_DIR`; to skip downloading Ollama models, set
+`JARVIS_SKIP_MODEL_PULL=1`. If Homebrew is unavailable, install Ollama from
+[ollama.com/download](https://ollama.com/download); on Linux, install
+whisper.cpp separately to enable voice input. The script reads `FAST_MODEL`,
+`ADVANCED_MODEL`, and `OLLAMA_BASE_URL` from `.env` and preserves an existing
+`.env`.
+
+If the repository is already cloned, run the script from its root:
+
+```bash
+./scripts/setup.sh
+```
+
+Manual setup:
+
 ```bash
 git clone https://github.com/Ibrmva/jarvis
 cd jarvis
@@ -123,6 +148,6 @@ def f(x): return sorted(set(x))
 backend/    FastAPI app, router, Ollama client, SQLite layer, whisper + command sidecars
 frontend/   zero-build vanilla UI served from the same origin
 models/     whisper weights land here (git-ignored; use scripts/fetch_models.sh)
-scripts/    fetch_models.sh
+scripts/    setup.sh, fetch_models.sh
 tests/      unittest suite + fake Ollama server
 ```
