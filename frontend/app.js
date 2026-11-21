@@ -183,6 +183,21 @@ async function checkHealth() {
   }
 }
 
+async function loadModelOptions() {
+  try {
+    const response = await fetch("/api/models");
+    if (!response.ok) throw new Error(`Could not load models (${response.status}).`);
+
+    const data = await response.json();
+    for (const model of data.models) {
+      const option = modelMode.querySelector(`option[value="${model.id}"]`);
+      if (option) option.textContent = model.label;
+    }
+  } catch (error) {
+    console.error("Could not load model options:", error);
+  }
+}
+
 async function loadHistory() {
   const requestedSessionId = sessionId;
   try {
@@ -573,6 +588,7 @@ document.addEventListener("keydown", event => {
 });
 
 checkHealth();
+loadModelOptions();
 loadHistory();
 refreshRecentChats();
 setInterval(checkHealth, 15000);

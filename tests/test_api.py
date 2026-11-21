@@ -201,9 +201,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["speech_engine"], "whisper.cpp")
 
     def test_models_endpoint_lists_three_modes(self):
-        body = self.client.get("/api/models").json()
+        with patch.object(
+            main,
+            "get_available_models",
+            new=AsyncMock(return_value=[FAST_MODEL, ADVANCED_MODEL]),
+        ):
+            body = self.client.get("/api/models").json()
         self.assertEqual([m["id"] for m in body["models"]], ["auto", "fast", "advanced"])
         self.assertTrue(all(m["available"] for m in body["models"]))
+        self.assertIn(FAST_MODEL, body["models"][1]["label"])
+        self.assertIn(ADVANCED_MODEL, body["models"][2]["label"])
 
     def test_sessions_endpoint_lists_created_session(self):
         self.client.post(
