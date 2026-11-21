@@ -256,6 +256,10 @@ button {
   backdrop-filter: blur(24px);
 }
 
+.sidebar-backdrop {
+  display: none;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -650,6 +654,10 @@ kbd {
   color: #8492a8;
   cursor: pointer;
   transition: .2s;
+}
+
+.sidebar-toggle {
+  display: none;
 }
 
 .icon-button:hover {
@@ -1573,18 +1581,48 @@ kbd {
 
 @media (max-width: 700px) {
   body {
-    overflow: auto;
+    overflow: hidden;
   }
 
   .app-shell {
     display: flex;
     flex-direction: column;
     min-height: 100vh;
+    height: 100vh;
     height: 100dvh;
   }
 
   .sidebar {
+    position: fixed;
+    z-index: 5;
+    inset: 0 auto 0 0;
+    display: flex;
+    width: min(320px, calc(100vw - 48px));
+    max-width: 85vw;
+    padding: max(20px, env(safe-area-inset-top))
+      16px max(16px, env(safe-area-inset-bottom));
+    transform: translateX(-105%);
+    transition: transform .22s ease;
+    background: #0b101a;
+    box-shadow: 20px 0 50px rgba(0,0,0,.32);
+  }
+
+  .sidebar.is-open {
+    transform: translateX(0);
+  }
+
+  .sidebar-backdrop {
+    position: fixed;
+    z-index: 4;
+    inset: 0;
     display: none;
+    border: 0;
+    background: rgba(3,6,12,.62);
+    backdrop-filter: blur(3px);
+  }
+
+  body.sidebar-open .sidebar-backdrop {
+    display: block;
   }
 
   .main-panel {
@@ -1594,11 +1632,53 @@ kbd {
 
   .topbar {
     min-height: 62px;
-    padding: 0 16px;
+    padding: env(safe-area-inset-top)
+      max(16px, env(safe-area-inset-right)) 0
+      max(16px, env(safe-area-inset-left));
   }
 
   .mobile-brand {
     display: flex;
+    flex: 1;
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .sidebar-toggle {
+    display: grid;
+    place-items: center;
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: rgba(255,255,255,.035);
+    color: #a9bad2;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .sidebar-toggle svg {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+  }
+
+  .brand-mark.small {
+    flex: 0 0 30px;
+  }
+
+  .topbar-actions {
+    flex: 0 0 auto;
+  }
+
+  .icon-button {
+    width: 44px;
+    height: 44px;
   }
 
   .topbar-context {
@@ -1615,7 +1695,8 @@ kbd {
   }
 
   .workspace {
-    padding: 20px 16px 10px;
+    padding: 20px max(16px, env(safe-area-inset-right)) 10px
+      max(16px, env(safe-area-inset-left));
   }
 
   .welcome {
@@ -1642,8 +1723,26 @@ kbd {
   }
 
   .composer-area {
-    width: calc(100% - 28px);
+    width: auto;
+    margin-right: max(14px, env(safe-area-inset-right));
+    margin-left: max(14px, env(safe-area-inset-left));
     padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .composer textarea {
+    font-size: 16px;
+  }
+
+  .select-wrap select {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .mic-button,
+  .send-button {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
   }
 
   .composer-bottom {
@@ -1664,6 +1763,20 @@ kbd {
 
   .snow-vision {
     padding: 13px;
+  }
+}
+
+@media (max-width: 380px) {
+  .secure-pill {
+    display: none;
+  }
+
+  .welcome h1 {
+    font-size: clamp(29px, 9vw, 34px);
+  }
+
+  .composer-bottom {
+    gap: 8px;
   }
 }
 
@@ -1759,5 +1872,6 @@ kbd {
     animation-duration: .01ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
   }
 }

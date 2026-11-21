@@ -25,6 +25,10 @@ const connectionLabel = document.getElementById("connection-label");
 const modelLabel = document.getElementById("model-label");
 const modelMode = document.getElementById("model-mode");
 const recentChatsEl = document.getElementById("recent-chats");
+const sidebar = document.getElementById("sidebar");
+const sidebarToggle = document.getElementById("sidebar-toggle");
+const sidebarBackdrop = document.getElementById("sidebar-backdrop");
+const mainPanel = document.querySelector(".main-panel");
 
 let audioContext = null;
 let mediaStream = null;
@@ -39,6 +43,42 @@ let voiceEnabled = localStorage.getItem(VOICE_ENABLED_KEY) !== "false";
 let speechVoices = [];
 
 const MAX_RECORDING_SECONDS = 60;
+
+function setSidebarOpen(open, restoreFocus = false) {
+  const isMobile = window.matchMedia("(max-width: 700px)").matches;
+  if (open && !isMobile) return;
+
+  document.body.classList.toggle("sidebar-open", open);
+  sidebar.classList.toggle("is-open", open);
+  sidebar.inert = isMobile && !open;
+  mainPanel.inert = open;
+  if (isMobile) {
+    sidebar.setAttribute("aria-hidden", String(!open));
+  } else {
+    sidebar.removeAttribute("aria-hidden");
+  }
+  sidebarToggle.setAttribute("aria-expanded", String(open));
+  sidebarToggle.setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
+
+  if (open) {
+    sidebar.querySelector("button")?.focus();
+  } else if (restoreFocus && isMobile) {
+    sidebarToggle.focus();
+  }
+}
+
+setSidebarOpen(false);
+sidebarToggle.addEventListener("click", () => {
+  setSidebarOpen(!document.body.classList.contains("sidebar-open"), true);
+});
+sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false, true));
+sidebar.addEventListener("click", event => {
+  if (event.target.closest("button")) setSidebarOpen(false, true);
+});
+modelMode.addEventListener("change", () => setSidebarOpen(false, true));
+window.addEventListener("resize", () => {
+  setSidebarOpen(false);
+});
 
 function setAssistantState(state, label) {
   if (orbStage) orbStage.dataset.state = state;
@@ -581,6 +621,32 @@ micButton.addEventListener("click", async () => {
 });
 
 document.addEventListener("keydown", event => {
+  if (document.body.classList.contains("sidebar-open")) {
+    if (event.key === "Escape") {
+      setSidebarOpen(false, true);
+      return;
+    }
+
+    if (event.key === "Tab") {
+      const focusable = sidebar.querySelectorAll(
+        'a[href], button:not(:disabled), select:not(:disabled), textarea:not(:disabled)'
+      );
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (!sidebar.contains(document.activeElement)) {
+        event.preventDefault();
+        first?.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    }
+  }
+
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
     startNewConversation();

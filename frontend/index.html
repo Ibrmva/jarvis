@@ -3,11 +3,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#080b12" />
   <meta name="description" content="JARVIS — your private, local-first AI assistant." />
   <title>JARVIS — Personal AI</title>
-  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
 
   <style>
     /* Snow Vision navigation */
@@ -223,12 +223,31 @@
       </div>
 
     </aside>
+    <button
+      class="sidebar-backdrop"
+      id="sidebar-backdrop"
+      type="button"
+      aria-label="Close navigation"
+      tabindex="-1"
+    ></button>
 
     <main class="main-panel">
 
       <header class="topbar">
 
         <div class="mobile-brand">
+          <button
+            class="sidebar-toggle"
+            id="sidebar-toggle"
+            type="button"
+            aria-label="Open navigation"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16"/>
+            </svg>
+          </button>
           <div class="brand-mark small"><span>J</span><i></i></div>
           <span>J.A.R.V.I.S.</span>
         </div>
@@ -456,7 +475,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 
   <script>
     (() => {
