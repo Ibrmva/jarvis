@@ -8,6 +8,7 @@ JARVIS is a local-first personal AI assistant. Phase 2 routes requests between t
 - **Manual Fast and Advanced modes** in the interface. A manual choice always wins over the router.
 - **One conversation across models:** both tiers receive the same recent history, so switching tiers does not start a new chat. Each stored message keeps the `model` that produced it.
 - **Voice in, voice out:** `/api/transcribe` runs `whisper-cli` (whisper.cpp) locally for speech-to-text; replies are spoken with the browser's `speechSynthesis`.
+- **Optional wake word:** enable **Hey JARVIS** in the sidebar for local, always-on wake-word detection. Wait for the on-screen detection notice, then speak your request; it is sent after 1.2 seconds of silence. If no speech follows within 8 seconds, JARVIS discards the empty capture and listens again. Wake-word detection pauses while JARVIS transcribes and replies, then resumes. The browser streams microphone frames only to the local backend, and the detector model is downloaded on first use. Listening is off by default and pauses when the browser tab is backgrounded.
 - **Local command execution:** a fixed allowlist of `open …` phrases launches sites and apps (`open youtube`, `открой телеграм`, `найди на youtube …`). No shell, no arbitrary argv.
 - **SQLite migration** adds a `model` column without deleting existing messages.
 - **No cloud API is called by the backend.** `OLLAMA_KEEP_ALIVE=0` unloads a model after each reply (saves RAM, costs a reload next turn); use `5m` to keep it warm.
@@ -18,6 +19,7 @@ JARVIS is a local-first personal AI assistant. Phase 2 routes requests between t
 - Python **3.10+** (the code uses `str | None` and `list[dict]`)
 - [Ollama](https://ollama.com) on `127.0.0.1:11434`
 - `whisper-cli` from whisper.cpp **for voice input only** (`brew install whisper.cpp` on macOS; build from source on Linux)
+- `openwakeword` and ONNX Runtime (installed from `requirements.txt`) for wake-word detection
 - The GGML model for whisper — fetched by `scripts/fetch_models.sh`, deliberately not committed (57 MB)
 
 ## Setup
@@ -70,6 +72,7 @@ All settings come from `.env` (see `.env.example`); the defaults live in `backen
 
 - **`Whisper model not found: …/models/whisper/ggml-base-q5_1.bin`** on voice input — the weights are not in git. Run `./scripts/fetch_models.sh` (57 MB, checksum-verified), or point `WHISPER_MODEL_PATH` at an existing GGML `.bin`.
 - **`whisper-cli was not found on PATH`** — install whisper.cpp (`brew install whisper.cpp` on macOS, build from source on Linux) or set `WHISPER_EXECUTABLE` to the binary's full path.
+- **Wake-word listening fails to start** — allow microphone access, keep JARVIS open in a secure browser context (localhost or HTTPS), and ensure the first-run model download can reach GitHub. Microphone audio is processed by the local JARVIS backend.
 - **`JARVIS currently supports only English and Russian`** — the transcriber runs a language-detection pass first and refuses anything outside `ALLOWED_LANGUAGES` in `backend/speech_recognition.py`.
 
 ## Tests
@@ -110,6 +113,7 @@ def f(x): return sorted(set(x))
 - Router uses transparent, anchored heuristics (regex code detection + whole-word intent keywords), not a trained classifier.
 - No automatic RAM telemetry or idle-model watchdog yet.
 - No cloud provider integration; cloud support is a later opt-in milestone with an explicit consent step.
+- The optional Hey JARVIS detector recognizes English wake phrases and requires the browser tab to remain open; mobile browsers may suspend it while backgrounded.
 - `stream:false` and a fixed `num_predict=512`: long answers are truncated and there is no token streaming in the UI yet.
 - Command execution and the `whisper-cli` lookup are macOS-shaped (`open -a`, `/opt/homebrew/bin`).
 

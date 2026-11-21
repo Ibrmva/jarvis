@@ -3,7 +3,14 @@ from contextlib import asynccontextmanager
 from uuid import UUID
 import logging
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import (
+    FastAPI,
+    File,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.concurrency import run_in_threadpool
@@ -36,6 +43,12 @@ from backend.speech_recognition import (
     SpeechRecognitionError,
 )
 from backend.command_executor import execute_command
+from backend.wake_word import (
+    WakeWordError,
+    detect_wake_word,
+    load_wake_word_model,
+    reset_wake_word_model,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis")
@@ -187,6 +200,44 @@ async def speech_to_text(audio: UploadFile = File(...)):
 
     finally:
         await audio.close()
+
+
+@app.websocket("/api/wake-word")
+async def wake_word(websocket: WebSocket):
+    await websocket.accept()
+    model_loaded = False
+
+    try:
+        await run_in_threadpool(load_wake_word_model)
+        model_loaded = True
+        await websocket.send_json({"type": "ready"})
+
+        while True:
+            frame = await websocket.receive_bytes()
+            if len(frame) > 8192:
+                await websocket.close(code=1009, reason="Audio frame is too large.")
+                return
+            if not frame or len(frame) % 2:
+                await websocket.close(code=1003, reason="Expected 16-bit PCM audio.")
+                return
+
+            detected = await run_in_threadpool(detect_wake_word, frame)
+            if detected:
+                await websocket.send_json({"type": "wake"})
+                await websocket.close()
+                return
+    except WebSocketDisconnect:
+        return
+    except WakeWordError as exc:
+        logger.warning("Wake-word detector error: %s", exc)
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+            await websocket.close(code=1011)
+        except RuntimeError:
+            pass
+    finally:
+        if model_loaded:
+            await run_in_threadpool(reset_wake_word_model)
 
 
 @app.post("/api/chat", response_model=ChatResponse)

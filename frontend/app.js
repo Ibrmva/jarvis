@@ -29,6 +29,8 @@ const sidebar = document.getElementById("sidebar");
 const sidebarToggle = document.getElementById("sidebar-toggle");
 const sidebarBackdrop = document.getElementById("sidebar-backdrop");
 const mainPanel = document.querySelector(".main-panel");
+const wakeWordToggle = document.getElementById("wake-word-toggle");
+const wakeWordToast = document.getElementById("wake-word-toast");
 
 let audioContext = null;
 let mediaStream = null;
@@ -41,8 +43,22 @@ let isRecording = false;
 let isBusy = false;
 let voiceEnabled = localStorage.getItem(VOICE_ENABLED_KEY) !== "false";
 let speechVoices = [];
+let wakeWordEnabled = false;
+let wakeWordStarting = false;
+let wakeWordActive = false;
+let wakeWordSocket = null;
+let wakeWordReadyReject = null;
+let wakeWordRemainder = new Float32Array(0);
+let wakeCaptureMode = false;
+let wakeReplyInProgress = false;
+let wakeSpeechStartedAt = 0;
+let wakeSilenceStartedAt = 0;
+let wakeSpeechCandidateFrames = 0;
+let wakeAutoStopTriggered = false;
+let wakeWordToastTimer = null;
 
 const MAX_RECORDING_SECONDS = 60;
+const WAKEWORD_FRAME_SAMPLES = 1280;
 
 function setSidebarOpen(open, restoreFocus = false) {
   const isMobile = window.matchMedia("(max-width: 700px)").matches;
@@ -90,6 +106,342 @@ function setVoiceStatus(message, state = "") {
   voiceStatusText.textContent = message;
   voiceStatus.className = `voice-status ${state}`.trim();
 }
+
+function updateWakeWordButton(starting = false) {
+  wakeWordToggle.textContent = starting
+    ? "Starting…"
+    : !wakeWordEnabled
+      ? "Off"
+      : wakeCaptureMode
+        ? "Speak now"
+        : wakeWordActive
+          ? "Listening"
+          : "Paused";
+  wakeWordToggle.setAttribute("aria-pressed", String(wakeWordEnabled));
+  wakeWordToggle.title = wakeWordEnabled
+    ? "Disable local wake-word listening"
+    : "Enable local wake-word listening";
+}
+
+function showWakeWordToast(message, duration = 3500) {
+  clearTimeout(wakeWordToastTimer);
+  wakeWordToast.textContent = message;
+  wakeWordToast.hidden = false;
+  if (duration) {
+    wakeWordToastTimer = setTimeout(() => {
+      wakeWordToast.hidden = true;
+    }, duration);
+  }
+}
+
+function releaseWakeWordAudio() {
+  processor?.disconnect();
+  audioSource?.disconnect();
+  silentGain?.disconnect();
+  mediaStream?.getTracks().forEach(track => track.stop());
+
+  const context = audioContext;
+  audioContext = null;
+  mediaStream = null;
+  audioSource = null;
+  processor = null;
+  silentGain = null;
+  audioChunks = [];
+
+  if (context && context.state !== "closed") {
+    context.close().catch(error => console.warn("Audio context close warning:", error));
+  }
+}
+
+function stopWakeWordListener() {
+  wakeWordActive = false;
+  wakeWordRemainder = new Float32Array(0);
+  wakeWordReadyReject?.(new Error("Wake-word listening was disabled."));
+  wakeWordReadyReject = null;
+  const socket = wakeWordSocket;
+  wakeWordSocket = null;
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+  }
+
+  if (!wakeCaptureMode) releaseWakeWordAudio();
+}
+
+function stopWakeWordOnPageHide() {
+  wakeWordEnabled = false;
+  wakeCaptureMode = false;
+  isRecording = false;
+  stopWakeWordListener();
+  releaseWakeWordAudio();
+}
+
+function processWakeAudio(event) {
+  const samples = event.inputBuffer.getChannelData(0);
+
+  if (wakeCaptureMode) {
+    if (!isRecording) return;
+
+    audioChunks.push(new Float32Array(samples));
+    const now = Date.now();
+    let energy = 0;
+    for (let i = 0; i < samples.length; i++) energy += samples[i] * samples[i];
+    const rms = Math.sqrt(energy / samples.length);
+
+    if (rms > 0.008) {
+      wakeSpeechCandidateFrames++;
+      if (wakeSpeechCandidateFrames >= 2) {
+        wakeSpeechStartedAt = now;
+        wakeSilenceStartedAt = 0;
+      }
+    } else {
+      wakeSpeechCandidateFrames = 0;
+      if (wakeSpeechStartedAt && !wakeSilenceStartedAt) {
+        wakeSilenceStartedAt = now;
+      }
+    }
+
+    const speechEnded = wakeSpeechStartedAt && wakeSilenceStartedAt &&
+      now - wakeSilenceStartedAt >= 1200;
+    const noSpeechTimeout = !wakeSpeechStartedAt && now - recordingStartedAt >= 8000;
+    const recordingTimeout = now - recordingStartedAt >= MAX_RECORDING_SECONDS * 1000;
+    if (!wakeAutoStopTriggered && noSpeechTimeout) {
+      wakeAutoStopTriggered = true;
+      void discardWakeCapture();
+    } else if (!wakeAutoStopTriggered && (speechEnded || recordingTimeout)) {
+      wakeAutoStopTriggered = true;
+      void stopRecording();
+    }
+    return;
+  }
+
+  if (!wakeWordActive || !wakeWordSocket || wakeWordSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  const ratio = audioContext.sampleRate / 16000;
+  const outputLength = Math.floor(samples.length / ratio);
+  const resampled = new Float32Array(outputLength);
+  for (let i = 0; i < outputLength; i++) {
+    const position = i * ratio;
+    const left = Math.floor(position);
+    const fraction = position - left;
+    resampled[i] = samples[left] * (1 - fraction) +
+      samples[Math.min(left + 1, samples.length - 1)] * fraction;
+  }
+
+  const combined = new Float32Array(wakeWordRemainder.length + resampled.length);
+  combined.set(wakeWordRemainder);
+  combined.set(resampled, wakeWordRemainder.length);
+
+  let offset = 0;
+  while (offset + WAKEWORD_FRAME_SAMPLES <= combined.length) {
+    if (wakeWordSocket.bufferedAmount > 8192) break;
+
+    const pcm = new Int16Array(WAKEWORD_FRAME_SAMPLES);
+    for (let i = 0; i < WAKEWORD_FRAME_SAMPLES; i++) {
+      const sample = Math.max(-1, Math.min(1, combined[offset + i]));
+      pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    }
+    wakeWordSocket.send(pcm.buffer);
+    offset += WAKEWORD_FRAME_SAMPLES;
+  }
+  wakeWordRemainder = combined.slice(offset);
+}
+
+function onWakeWordDetected() {
+  if (!wakeWordEnabled || !wakeWordActive) return;
+
+  wakeWordActive = false;
+  wakeCaptureMode = true;
+  wakeWordRemainder = new Float32Array(0);
+  audioChunks = [];
+  recordingStartedAt = Date.now();
+  wakeSpeechStartedAt = 0;
+  wakeSilenceStartedAt = 0;
+  wakeSpeechCandidateFrames = 0;
+  wakeAutoStopTriggered = false;
+  isRecording = true;
+  updateWakeWordButton();
+  showWakeWordToast("Hey JARVIS heard you. Speak now; sending after 1.2 seconds of silence.");
+
+  const socket = wakeWordSocket;
+  wakeWordSocket = null;
+  socket?.close();
+
+  micButton.classList.add("recording");
+  micIcon.innerHTML = '<path d="M7 7h10v10H7z"/>';
+  micButton.setAttribute("aria-label", "Stop recording");
+  setAssistantState("listening", "Hey JARVIS heard you");
+  setVoiceStatus("Wake word detected. Speak now; I’ll send your message after a pause.", "recording");
+}
+
+async function startWakeWordListener() {
+  if (!wakeWordEnabled || wakeWordStarting || wakeWordActive || wakeCaptureMode || isBusy) return;
+  if (!navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext)) {
+    throw new Error("Wake-word listening is unavailable in this browser.");
+  }
+
+  wakeWordStarting = true;
+  updateWakeWordButton(true);
+  setVoiceStatus("Starting the local wake-word detector…", "processing");
+  let socket = null;
+
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+
+    if (!wakeWordEnabled) {
+      releaseWakeWordAudio();
+      return;
+    }
+
+    socket = new WebSocket(
+      `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/wake-word`
+    );
+    wakeWordSocket = socket;
+
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out loading the wake-word detector.")),
+        120000
+      );
+      let initialized = false;
+      const finish = callback => value => {
+        clearTimeout(timeout);
+        wakeWordReadyReject = null;
+        callback(value);
+      };
+      const ready = finish(resolve);
+      const failed = finish(reject);
+      wakeWordReadyReject = failed;
+
+      socket.onmessage = event => {
+        const message = JSON.parse(event.data);
+        if (message.type === "ready" && !initialized) {
+          initialized = true;
+          ready();
+        } else if (message.type === "wake") {
+          onWakeWordDetected();
+        } else if (message.type === "error") {
+          const error = new Error(message.message || "Wake-word detection failed.");
+          if (!initialized) {
+            failed(error);
+          } else {
+            wakeWordEnabled = false;
+            stopWakeWordListener();
+            updateWakeWordButton();
+            setVoiceStatus(error.message, "error");
+          }
+        }
+      };
+      socket.onerror = () => failed(new Error("Could not connect to the local wake-word detector."));
+      socket.onclose = () => {
+        if (!initialized && wakeWordEnabled) {
+          failed(new Error("The wake-word detector connection closed."));
+        } else if (wakeWordEnabled && wakeWordActive) {
+          wakeWordEnabled = false;
+          wakeWordActive = false;
+          wakeWordSocket = null;
+          updateWakeWordButton();
+          releaseWakeWordAudio();
+          setVoiceStatus("Wake-word listening stopped unexpectedly.", "error");
+        }
+      };
+    });
+
+    if (!wakeWordEnabled || wakeWordSocket !== socket) return;
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    audioContext = new AudioContextClass();
+    await audioContext.resume();
+    audioSource = audioContext.createMediaStreamSource(mediaStream);
+    processor = audioContext.createScriptProcessor(4096, 1, 1);
+    silentGain = audioContext.createGain();
+    silentGain.gain.value = 0;
+    processor.onaudioprocess = processWakeAudio;
+    audioSource.connect(processor);
+    processor.connect(silentGain);
+    silentGain.connect(audioContext.destination);
+
+    wakeWordActive = true;
+    updateWakeWordButton();
+    setAssistantState("listening", "Listening for Hey JARVIS");
+    setVoiceStatus("Listening locally for “Hey JARVIS”. The microphone stays on until disabled.", "recording");
+  } catch (error) {
+    if (socket) {
+      socket.onclose = null;
+      socket.close();
+    }
+    if (wakeWordSocket === socket) wakeWordSocket = null;
+    releaseWakeWordAudio();
+    throw error;
+  } finally {
+    wakeWordStarting = false;
+    updateWakeWordButton();
+  }
+}
+
+async function toggleWakeWord() {
+  if (wakeWordEnabled) {
+    wakeWordEnabled = false;
+    stopWakeWordListener();
+    updateWakeWordButton();
+    setAssistantState("idle", "Standing by for your command");
+    setVoiceStatus("Wake-word listening is off.");
+    return;
+  }
+
+  wakeWordEnabled = true;
+  updateWakeWordButton(true);
+  try {
+    await startWakeWordListener();
+  } catch (error) {
+    if (!wakeWordEnabled) return;
+    wakeWordEnabled = false;
+    stopWakeWordListener();
+    updateWakeWordButton();
+    setAssistantState("idle", "Wake-word listening unavailable");
+    setVoiceStatus(error.message, "error");
+  }
+}
+
+async function resumeWakeWordListener() {
+  if (!wakeWordEnabled || isBusy || isRecording || document.hidden) return;
+  try {
+    await startWakeWordListener();
+  } catch (error) {
+    wakeWordEnabled = false;
+    stopWakeWordListener();
+    updateWakeWordButton();
+    setVoiceStatus(error.message, "error");
+  }
+}
+
+function stopWakeWordAfterPlayback() {
+  if (wakeWordEnabled) void resumeWakeWordListener();
+}
+
+wakeWordToggle.addEventListener("click", toggleWakeWord);
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && wakeCaptureMode && isRecording) {
+    wakeAutoStopTriggered = true;
+    void stopRecording();
+  } else if (document.hidden && (wakeWordActive || wakeWordStarting)) {
+    stopWakeWordListener();
+    updateWakeWordButton();
+    setVoiceStatus("Wake-word listening paused while this tab is in the background.");
+  } else if (!document.hidden && wakeWordEnabled && !wakeCaptureMode) {
+    void resumeWakeWordListener();
+  }
+});
 
 function setBusy(busy) {
   isBusy = busy;
@@ -164,10 +516,11 @@ function detectSpeechLanguage(text) {
 }
 
 function speakReply(text) {
-  if (!voiceEnabled || !("speechSynthesis" in window) || !text) return;
+  if (!voiceEnabled || !("speechSynthesis" in window) || !text) return false;
 
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
+  wakeReplyInProgress = true;
   const language = detectSpeechLanguage(text);
   utterance.lang = language;
   loadSpeechVoices();
@@ -182,13 +535,20 @@ function speakReply(text) {
   utterance.volume = 1;
 
   utterance.onstart = () => setAssistantState("speaking", "JARVIS is speaking");
-  utterance.onend = () => setAssistantState("idle", "Standing by for your command");
+  utterance.onend = () => {
+    wakeReplyInProgress = false;
+    setAssistantState("idle", "Standing by for your command");
+    stopWakeWordAfterPlayback();
+  };
   utterance.onerror = event => {
+    wakeReplyInProgress = false;
     console.warn("Speech synthesis issue:", event.error);
     setAssistantState("idle", "Reply displayed · voice playback unavailable");
+    stopWakeWordAfterPlayback();
   };
 
   window.speechSynthesis.speak(utterance);
+  return true;
 }
 
 if ("speechSynthesis" in window) {
@@ -472,7 +832,7 @@ function encodeWav(samples, sampleRate) {
 
 async function startRecording() {
   if (isBusy || isRecording) return;
-  if (!navigator.mediaDevices?.getUserMedia || !window.AudioContext) {
+  if (!navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext)) {
     throw new Error("Microphone recording is unavailable in this browser. Try a recent Safari or Chrome version.");
   }
 
@@ -485,7 +845,8 @@ async function startRecording() {
     }
   });
 
-  audioContext = new AudioContext();
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  audioContext = new AudioContextClass();
   await audioContext.resume();
 
   audioSource = audioContext.createMediaStreamSource(mediaStream);
@@ -496,6 +857,7 @@ async function startRecording() {
   audioChunks = [];
   recordingStartedAt = Date.now();
   isRecording = true;
+  wakeCaptureMode = false;
 
   processor.onaudioprocess = event => {
     if (!isRecording) return;
@@ -514,6 +876,52 @@ async function startRecording() {
   micButton.setAttribute("aria-label", "Stop recording");
   setAssistantState("listening", "Listening to your voice");
   setVoiceStatus("Listening… Speak in English or Russian, then press the microphone to send.", "recording");
+}
+
+async function discardWakeCapture() {
+  if (!wakeCaptureMode || !isRecording) return;
+  isRecording = false;
+
+  processor?.disconnect();
+  audioSource?.disconnect();
+  silentGain?.disconnect();
+  mediaStream?.getTracks().forEach(track => track.stop());
+
+  const context = audioContext;
+  audioContext = null;
+  mediaStream = null;
+  audioSource = null;
+  processor = null;
+  silentGain = null;
+  audioChunks = [];
+  wakeCaptureMode = false;
+  wakeSpeechStartedAt = 0;
+  wakeSilenceStartedAt = 0;
+  wakeSpeechCandidateFrames = 0;
+  wakeAutoStopTriggered = false;
+
+  if (context && context.state !== "closed") {
+    try {
+      await context.close();
+    } catch (error) {
+      console.warn("Audio context close warning:", error);
+    }
+  }
+
+  micButton.classList.remove("recording");
+  micButton.disabled = false;
+  micIcon.innerHTML = '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-4 0h8"/>';
+  micButton.setAttribute("aria-label", "Start microphone recording");
+  setAssistantState("idle", wakeWordEnabled ? "Listening for Hey JARVIS" : "Standing by for your command");
+  updateWakeWordButton();
+  setVoiceStatus(
+    wakeWordEnabled ? "No speech heard. Listening for Hey JARVIS again." : "No speech heard.",
+    wakeWordEnabled ? "success" : "",
+  );
+  showWakeWordToast(
+    wakeWordEnabled ? "No request heard; listening for Hey JARVIS again." : "No request heard.",
+  );
+  await resumeWakeWordListener();
 }
 
 async function stopRecording() {
@@ -540,6 +948,13 @@ async function stopRecording() {
   processor = null;
   silentGain = null;
   audioChunks = [];
+  wakeCaptureMode = false;
+  wakeSpeechStartedAt = 0;
+  wakeSilenceStartedAt = 0;
+  wakeSpeechCandidateFrames = 0;
+  wakeAutoStopTriggered = false;
+  updateWakeWordButton();
+  if (wakeWordEnabled) showWakeWordToast("Sending your request to JARVIS…");
 
   micButton.classList.remove("recording");
   micButton.disabled = true;
@@ -597,11 +1012,18 @@ async function stopRecording() {
       micIcon.innerHTML = '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-4 0h8"/>';
       micButton.setAttribute("aria-label", "Start microphone recording");
     }
+    if (wakeWordEnabled && !wakeReplyInProgress) {
+      void resumeWakeWordListener();
+    }
   }
 }
 
 micButton.addEventListener("click", async () => {
   if (isBusy) return;
+  if (wakeWordActive || wakeWordStarting) {
+    await toggleWakeWord();
+    return;
+  }
   if (isRecording) {
     await stopRecording();
     return;
@@ -968,3 +1390,4 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("pagehide", stopCamera);
+window.addEventListener("pagehide", stopWakeWordOnPageHide);

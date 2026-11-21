@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#080b12" />
   <meta name="description" content="JARVIS — your private, local-first AI assistant." />
   <title>JARVIS — Personal AI</title>
-  <link rel="stylesheet" href="/static/styles.css?v=7" />
+  <link rel="stylesheet" href="/static/styles.css?v=9" />
 
   <style>
     /* Snow Vision navigation */
@@ -203,11 +203,20 @@
           <span>English & Russian voice</span>
           <span class="cap-check">●</span>
         </div>
-        <div class="capability capability-muted">
+        <div class="capability wake-word-control">
           <span class="cap-icon">◉</span>
-          <span>Wake word</span>
-          <small>SOON</small>
+          <span>Hey JARVIS</span>
+          <button
+            id="wake-word-toggle"
+            class="wake-word-toggle"
+            type="button"
+            aria-pressed="false"
+            title="Enable local wake-word listening"
+          >Off</button>
         </div>
+        <p class="sidebar-hint">
+          Optional local listening. Say “Hey JARVIS”, wait for the listening status, then speak.
+        </p>
         <div class="capability capability-muted">
           <span class="cap-icon">⌘</span>
           <span>Mac automation</span>
@@ -278,6 +287,8 @@
         </div>
 
       </header>
+
+      <div id="wake-word-toast" class="wake-word-toast" role="status" aria-live="assertive" hidden></div>
 
       <section class="workspace">
 
@@ -475,7 +486,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=9"></script>
 
   <script>
     (() => {

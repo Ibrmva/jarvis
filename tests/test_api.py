@@ -212,6 +212,19 @@ class ApiTests(unittest.TestCase):
         self.assertIn(FAST_MODEL, body["models"][1]["label"])
         self.assertIn(ADVANCED_MODEL, body["models"][2]["label"])
 
+    def test_wake_word_websocket_reports_detection(self):
+        with (
+            patch.object(main, "load_wake_word_model"),
+            patch.object(main, "detect_wake_word", side_effect=[False, True]),
+            patch.object(main, "reset_wake_word_model") as reset_model,
+        ):
+            with self.client.websocket_connect("/api/wake-word") as websocket:
+                self.assertEqual(websocket.receive_json(), {"type": "ready"})
+                websocket.send_bytes(b"\0\0" * 1280)
+                websocket.send_bytes(b"\0\0" * 1280)
+                self.assertEqual(websocket.receive_json(), {"type": "wake"})
+        reset_model.assert_called_once_with()
+
     def test_sessions_endpoint_lists_created_session(self):
         self.client.post(
             "/api/chat",
