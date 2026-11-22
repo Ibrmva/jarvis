@@ -157,6 +157,31 @@ class ApiTests(unittest.TestCase):
         executor.assert_called_once_with("open youtube")
         self.assertEqual(support.fake_requests(), [])
 
+    def test_unknown_website_is_resolved_by_local_model_and_opened(self):
+        with (
+            patch.object(
+                main,
+                "resolve_website_url",
+                new=AsyncMock(return_value="https://www.reddit.com"),
+            ),
+            patch.object(main, "open_website") as open_website,
+        ):
+            response = self.client.post(
+                "/api/chat",
+                json={
+                    "session_id": self.session_id,
+                    "message": "Could you open Reddit?",
+                    "model_mode": "fast",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["model"], "macOS")
+        self.assertEqual(body["tier"], "action")
+        self.assertEqual(body["reply"], "Opening Reddit.")
+        open_website.assert_called_once_with("https://www.reddit.com")
+
     # ---- degradation --------------------------------------------------
     def test_missing_advanced_model_in_manual_mode_returns_409(self):
         with patch.object(main, "get_available_models", new=AsyncMock(return_value=[FAST_MODEL])):

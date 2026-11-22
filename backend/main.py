@@ -2,6 +2,8 @@
 from contextlib import asynccontextmanager
 from uuid import UUID
 import logging
+import re
+import subprocess
 
 from fastapi import (
     FastAPI,
@@ -39,12 +41,18 @@ from backend.ollama_client import (
     generate_reply,
     get_available_models,
     OllamaUnavailable,
+    resolve_website_url,
 )
 from backend.speech_recognition import (
     transcribe_audio,
     SpeechRecognitionError,
 )
-from backend.command_executor import execute_command
+from backend.command_executor import (
+    execute_command,
+    extract_website_open_target,
+    open_website,
+    validate_website_url,
+)
 from backend.wake_word import (
     WakeWordError,
     detect_wake_word,
@@ -280,8 +288,11 @@ async def chat(request: ChatRequest):
 
     # Execute recognized macOS actions before calling the AI model.
     command_result = None
+    website_target = None
     if not request.regenerate:
         command_result = await run_in_threadpool(execute_command, user_message)
+        if command_result is None:
+            website_target = extract_website_open_target(user_message)
 
     if command_result is not None:
         reply = command_result["reply"]
@@ -336,6 +347,32 @@ async def chat(request: ChatRequest):
                         "No configured JARVIS model is installed. "
                         f"Run: ollama pull {FAST_MODEL}"
                     ),
+                )
+
+        if website_target:
+            resolved_url = validate_website_url(
+                await resolve_website_url(website_target, selected_model)
+            )
+            if resolved_url:
+                try:
+                    await run_in_threadpool(open_website, resolved_url)
+                    russian = bool(re.search(r"[А-Яа-яЁё]", user_message))
+                    reply = (
+                        f"Открываю {website_target}."
+                        if russian
+                        else f"Opening {website_target}."
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    logger.warning("Could not open website %s: %s", resolved_url, exc)
+                    reply = "I identified the website, but could not open it."
+
+                save_message(request.session_id, "assistant", reply, "macOS")
+                return ChatResponse(
+                    session_id=request.session_id,
+                    reply=reply,
+                    model="macOS",
+                    tier="action",
+                    routing_reason="open_website",
                 )
 
         history_items = get_history(

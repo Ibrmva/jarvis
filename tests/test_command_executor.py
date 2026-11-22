@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import patch
 
-from backend.command_executor import execute_command
+from backend.command_executor import (
+    execute_command,
+    extract_website_open_target,
+    validate_website_url,
+)
 
 
 class CommandExecutorTests(unittest.TestCase):
@@ -11,6 +15,28 @@ class CommandExecutorTests(unittest.TestCase):
 
         self.assertEqual(result["reply"], "Opening youtube.")
         open_website.assert_called_once_with("https://www.youtube.com")
+
+    def test_extracts_dynamic_website_targets(self):
+        self.assertEqual(extract_website_open_target("Could you open Reddit?"), "Reddit")
+        self.assertEqual(
+            extract_website_open_target("открой сайт Wikipedia"),
+            "Wikipedia",
+        )
+
+    def test_validates_only_public_https_website_urls(self):
+        self.assertEqual(
+            validate_website_url("https://www.reddit.com/r/python"),
+            "https://www.reddit.com/r/python",
+        )
+        for url in (
+            "http://example.com",
+            "javascript:alert(1)",
+            "https://localhost",
+            "https://127.0.0.1",
+            "https://user@example.com",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(validate_website_url(url))
 
     @patch("backend.command_executor.open_website")
     def test_russian_open_command_replies_in_russian(self, open_website):

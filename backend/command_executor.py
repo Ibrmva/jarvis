@@ -1,7 +1,8 @@
 
+import ipaddress
 import re
 import subprocess
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 
 WEBSITES = {
@@ -52,6 +53,19 @@ RUSSIAN_COMMAND = re.compile(
     r"^(?:открой|открыть|запусти|запустить|найди|поищи)\b"
 )
 
+WEBSITE_OPEN_PATTERNS = (
+    re.compile(
+        r"^(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+        r"(?:open|visit|browse|go\s+to|navigate\s+to|take\s+me\s+to)\s+(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:открой(?:те)?|открыть|посети(?:те)?|перейди(?:те)?(?:\s+на)?|"
+        r"зайди(?:те)?(?:\s+на)?)\s+(.+)$",
+        re.IGNORECASE,
+    ),
+)
+
 
 def open_website(url: str) -> None:
     subprocess.run(
@@ -59,6 +73,71 @@ def open_website(url: str) -> None:
         check=True,
         timeout=10,
     )
+
+
+def extract_website_open_target(message: str) -> str | None:
+    text = message.strip().rstrip(".!?").strip()
+    for pattern in WEBSITE_OPEN_PATTERNS:
+        match = pattern.match(text)
+        if match:
+            target = match.group(1).strip()
+            target = re.sub(
+                r"^(?:(?:the|official)\s+)*(?:website|site)\s+(?:(?:for|of)\s+)?",
+                "",
+                target,
+                flags=re.IGNORECASE,
+            )
+            target = re.sub(r"^сайт\s+", "", target, flags=re.IGNORECASE)
+            target = re.sub(r"\s+(?:please|for me)$", "", target, flags=re.IGNORECASE)
+            return target.strip() or None
+    return None
+
+
+def validate_website_url(url: str | None) -> str | None:
+    if not isinstance(url, str) or not url or len(url) > 2048:
+        return None
+
+    try:
+        parsed = urlsplit(url.strip())
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or "@" in parsed.netloc
+    ):
+        return None
+    if port is not None:
+        return None
+
+    try:
+        hostname = hostname.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError:
+        return None
+
+    if len(hostname) > 253 or "." not in hostname:
+        return None
+    if hostname.endswith((".localhost", ".local", ".internal", ".test", ".example")):
+        return None
+    try:
+        ipaddress.ip_address(hostname)
+        return None
+    except ValueError:
+        pass
+
+    labels = hostname.split(".")
+    if any(
+        not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+        for label in labels
+    ):
+        return None
+
+    return urlunsplit(("https", hostname, parsed.path or "", parsed.query, ""))
 
 
 def open_application(name: str) -> None:

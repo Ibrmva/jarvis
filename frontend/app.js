@@ -966,7 +966,7 @@ document.querySelectorAll(".suggestion").forEach(button => {
 function startNewConversation() {
   if (isBusy) return;
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-  sessionId = crypto.randomUUID();
+  sessionId = createSessionId();
   localStorage.setItem(SESSION_KEY, sessionId);
   messagesEl.replaceChildren();
   welcomeEl.style.display = "flex";
