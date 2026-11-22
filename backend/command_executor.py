@@ -66,6 +66,35 @@ WEBSITE_OPEN_PATTERNS = (
     ),
 )
 
+SEARCH_COMMAND = (
+    r"^(?:(?:please|can\s+you|could\s+you)\s+)?"
+    r"(?:найди|поищи|search(?:\s+for)?|find|look\s+up)\s+"
+)
+YOUTUBE_NAMES = r"(?:youtube|ютубе?|ютуб)"
+GOOGLE_NAMES = r"(?:google|гугле|гугл)"
+
+
+def extract_search_query(text: str, engine_names: str) -> str | None:
+    start_engine = re.match(
+        SEARCH_COMMAND
+        + r"(?:(?:on|in|на|в)\s+)?"
+        + engine_names
+        + r"\s+(?:for\s+)?(.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    if start_engine:
+        return start_engine.group(1).strip() or None
+
+    end_engine = re.match(
+        SEARCH_COMMAND + r"(.+?)\s+(?:on|in|на|в)\s+" + engine_names + r"$",
+        text,
+        re.IGNORECASE,
+    )
+    if end_engine:
+        return end_engine.group(1).strip() or None
+    return None
+
 
 def open_website(url: str) -> None:
     subprocess.run(
@@ -154,8 +183,9 @@ def execute_command(message: str):
     Returns a response dictionary, or None if this is not a command.
     """
 
-    text = message.strip().lower()
-    text = re.sub(r"[.!?]+$", "", text).strip()
+    original_text = message.strip()
+    original_text = re.sub(r"[.!?]+$", "", original_text).strip()
+    text = original_text.lower()
     russian = bool(RUSSIAN_COMMAND.match(text))
 
     open_match = re.match(
@@ -216,14 +246,9 @@ def execute_command(message: str):
                     "action": "error",
                 }
 
-    youtube_search = re.match(
-        r"^(?:найди|поищи|search(?:\s+for)?)\s+"
-        r"(?:на\s+)?(?:youtube|ютубе?|ютуб)\s+(.+)$",
-        text,
-    )
-
-    if youtube_search:
-        query = youtube_search.group(1).strip()
+    youtube_query = extract_search_query(original_text, YOUTUBE_NAMES)
+    if youtube_query:
+        query = youtube_query
         url = (
             "https://www.youtube.com/results?search_query="
             + quote_plus(query)
@@ -248,14 +273,9 @@ def execute_command(message: str):
                 "action": "error",
             }
 
-    google_search = re.match(
-        r"^(?:найди|поищи|search(?:\s+for)?)\s+"
-        r"(?:в\s+)?(?:google|гугле|гугл)\s+(.+)$",
-        text,
-    )
-
-    if google_search:
-        query = google_search.group(1).strip()
+    google_query = extract_search_query(original_text, GOOGLE_NAMES)
+    if google_query:
+        query = google_query
         url = "https://www.google.com/search?q=" + quote_plus(query)
 
         try:
