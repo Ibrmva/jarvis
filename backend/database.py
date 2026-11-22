@@ -52,14 +52,69 @@ def initialize_database() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_id_id ON messages(session_id, id)")
 
 
-def get_history(session_id: str, limit: int = 20) -> list[dict]:
+def get_history(
+    session_id: str,
+    limit: int = 20,
+    exclude_message_id: int | None = None,
+) -> list[dict]:
     """Newest `limit` messages, returned oldest-first (model context order)."""
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-            (session_id, limit),
-        ).fetchall()
+        if exclude_message_id is None:
+            rows = conn.execute(
+                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT role, content FROM messages
+                WHERE session_id = ? AND id != ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (session_id, exclude_message_id, limit),
+            ).fetchall()
     return [dict(row) for row in reversed(rows)]
+
+
+def get_latest_exchange(session_id: str) -> dict | None:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, role, content, model FROM messages
+            WHERE session_id = ?
+            ORDER BY id DESC
+            LIMIT 2
+            """,
+            (session_id,),
+        ).fetchall()
+
+    if len(rows) != 2 or rows[0]["role"] != "assistant" or rows[1]["role"] != "user":
+        return None
+
+    return {
+        "assistant_id": rows[0]["id"],
+        "assistant_model": rows[0]["model"],
+        "user_content": rows[1]["content"],
+    }
+
+
+def replace_latest_assistant(
+    session_id: str,
+    message_id: int,
+    content: str,
+    model: str,
+) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE messages
+            SET content = ?, model = ?
+            WHERE id = ? AND session_id = ? AND role = 'assistant'
+              AND id = (SELECT MAX(id) FROM messages WHERE session_id = ?)
+            """,
+            (content, model, message_id, session_id, session_id),
+        )
+    return cursor.rowcount == 1
 
 
 def get_display_history(session_id: str, limit: int = 100) -> list[dict]:

@@ -27,8 +27,10 @@ from backend.database import (
     clear_history,
     get_history,
     get_display_history,
+    get_latest_exchange,
     get_recent_sessions,
     initialize_database,
+    replace_latest_assistant,
     save_message,
 )
 from backend.model_router import choose_model
@@ -74,6 +76,7 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=80)
     message: str = Field(min_length=1, max_length=12000)
+    regenerate: bool = False
     model_mode: str = Field(
         default="auto",
         pattern="^(auto|fast|advanced)$",
@@ -259,14 +262,26 @@ async def chat(request: ChatRequest):
             detail="Message cannot be empty.",
         )
 
-    # Save the user's command.
-    save_message(request.session_id, "user", user_message)
+    previous_exchange = None
+    if request.regenerate:
+        previous_exchange = get_latest_exchange(request.session_id)
+        if previous_exchange is None or previous_exchange["user_content"] != user_message:
+            raise HTTPException(
+                status_code=409,
+                detail="Only the latest assistant response can be regenerated.",
+            )
+        if previous_exchange["assistant_model"] == "macOS":
+            raise HTTPException(
+                status_code=409,
+                detail="macOS actions cannot be repeated with regenerate.",
+            )
+    else:
+        save_message(request.session_id, "user", user_message)
 
     # Execute recognized macOS actions before calling the AI model.
-    command_result = await run_in_threadpool(
-        execute_command,
-        user_message,
-    )
+    command_result = None
+    if not request.regenerate:
+        command_result = await run_in_threadpool(execute_command, user_message)
 
     if command_result is not None:
         reply = command_result["reply"]
@@ -326,16 +341,32 @@ async def chat(request: ChatRequest):
         history_items = get_history(
             request.session_id,
             limit=MAX_HISTORY_MESSAGES,
+            exclude_message_id=(
+                previous_exchange["assistant_id"] if previous_exchange else None
+            ),
         )
 
         reply = await generate_reply(history_items, selected_model)
 
-        save_message(
-            request.session_id,
-            "assistant",
-            reply,
-            selected_model,
-        )
+        if previous_exchange:
+            replaced = replace_latest_assistant(
+                request.session_id,
+                previous_exchange["assistant_id"],
+                reply,
+                selected_model,
+            )
+            if not replaced:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Conversation changed before the response could be regenerated.",
+                )
+        else:
+            save_message(
+                request.session_id,
+                "assistant",
+                reply,
+                selected_model,
+            )
 
         logger.info(
             "session=%s tier=%s model=%s reason=%s",

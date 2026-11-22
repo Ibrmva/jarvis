@@ -42,6 +42,8 @@ fi
 cd "$REPO_ROOT"
 REPO_ROOT="$(pwd)"
 
+command -v curl >/dev/null 2>&1 || die "curl is required."
+
 BREW_BIN="$(command -v brew || true)"
 if [[ -z "$BREW_BIN" ]]; then
   for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew; do
@@ -51,16 +53,34 @@ if [[ -z "$BREW_BIN" ]]; then
     fi
   done
 fi
+if [[ -z "$BREW_BIN" ]]; then
+  printf 'Homebrew was not found; installing it now...\n'
+  NONINTERACTIVE=1 /bin/bash -c \
+    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew; do
+    if [[ -x "$candidate" ]]; then
+      BREW_BIN="$candidate"
+      break
+    fi
+  done
+  [[ -n "$BREW_BIN" ]] || die "Homebrew installation completed, but brew was not found."
+fi
 if [[ -n "$BREW_BIN" ]]; then
   BREW_PREFIX="$("$BREW_BIN" --prefix)"
   PATH="$BREW_PREFIX/bin:$PATH"
   export PATH
 fi
 
-command -v curl >/dev/null 2>&1 || die "curl is required."
-command -v python3 >/dev/null 2>&1 || die "Python 3.10 or newer is required."
-python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
-  || die "Python 3.10 or newer is required."
+PYTHON_BIN=""
+for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do
+  if command -v "$candidate" >/dev/null 2>&1 \
+    && "$candidate" -c 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] < (3, 15) else 1)'; then
+    PYTHON_BIN="$(command -v "$candidate")"
+    break
+  fi
+done
+[[ -n "$PYTHON_BIN" ]] \
+  || die "Python 3.10 through 3.14 is required (Python 3.15 is not yet supported by ONNX Runtime)."
 
 if [[ ! -f .env ]]; then
   cp .env.example .env
@@ -69,7 +89,10 @@ fi
 
 if [[ ! -d .venv ]]; then
   printf 'Creating Python virtual environment...\n'
-  python3 -m venv .venv
+  "$PYTHON_BIN" -m venv .venv
+elif ! .venv/bin/python -c \
+  'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] < (3, 15) else 1)'; then
+  die "The existing .venv uses an unsupported Python version. Remove .venv and rerun setup to recreate it with Python 3.10 through 3.14."
 fi
 
 printf 'Installing Python dependencies...\n'

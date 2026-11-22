@@ -81,6 +81,41 @@ class ApiTests(unittest.TestCase):
         ]
         self.assertEqual([m["content"] for m in users], ["hello there"])
 
+    def test_regenerate_replaces_latest_reply_without_duplicating_user_message(self):
+        request = {
+            "session_id": self.session_id,
+            "message": "hello there",
+            "model_mode": "fast",
+        }
+        self.assertEqual(self.client.post("/api/chat", json=request).status_code, 200)
+
+        response = self.client.post("/api/chat", json={**request, "regenerate": True})
+
+        self.assertEqual(response.status_code, 200)
+        history = self.client.get(f"/api/history/{self.session_id}").json()["messages"]
+        self.assertEqual([message["role"] for message in history], ["user", "assistant"])
+        self.assertEqual(history[0]["content"], "hello there")
+        generated_messages = support.fake_requests()[-1]["messages"]
+        self.assertEqual(
+            [message["role"] for message in generated_messages if message["role"] == "user"],
+            ["user"],
+        )
+        self.assertFalse(any(message["role"] == "assistant" for message in generated_messages))
+
+    def test_regenerate_does_not_repeat_macos_actions(self):
+        canned = {"reply": "Opening youtube.", "action": "open_website"}
+        request = {
+            "session_id": self.session_id,
+            "message": "open youtube",
+            "model_mode": "auto",
+        }
+        with patch.object(main, "execute_command", return_value=canned) as executor:
+            self.assertEqual(self.client.post("/api/chat", json=request).status_code, 200)
+            response = self.client.post("/api/chat", json={**request, "regenerate": True})
+
+        self.assertEqual(response.status_code, 409)
+        executor.assert_called_once_with("open youtube")
+
     def test_history_is_shared_across_model_switches(self):
         self.client.post(
             "/api/chat",

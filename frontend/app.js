@@ -1,9 +1,21 @@
 const SESSION_KEY = "jarvis_session_id";
 const VOICE_ENABLED_KEY = "jarvis_voice_enabled";
+const SPEECH_VOICE_KEY = "jarvis_speech_voice";
+
+function createSessionId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 let sessionId = localStorage.getItem(SESSION_KEY);
 if (!sessionId) {
-  sessionId = crypto.randomUUID();
+  sessionId = createSessionId();
   localStorage.setItem(SESSION_KEY, sessionId);
 }
 
@@ -31,6 +43,7 @@ const sidebarBackdrop = document.getElementById("sidebar-backdrop");
 const mainPanel = document.querySelector(".main-panel");
 const wakeWordToggle = document.getElementById("wake-word-toggle");
 const wakeWordToast = document.getElementById("wake-word-toast");
+const speechVoiceSelect = document.getElementById("speech-voice-select");
 
 let audioContext = null;
 let mediaStream = null;
@@ -83,6 +96,20 @@ function setSidebarOpen(open, restoreFocus = false) {
   }
 }
 
+function updateMobileViewportHeight() {
+  const viewportHeight = window.visualViewport?.height;
+  if (viewportHeight && window.matchMedia("(max-width: 700px)").matches) {
+    document.documentElement.style.setProperty(
+      "--mobile-viewport-height",
+      `${Math.round(viewportHeight)}px`
+    );
+  } else {
+    document.documentElement.style.removeProperty("--mobile-viewport-height");
+  }
+}
+
+updateMobileViewportHeight();
+window.visualViewport?.addEventListener("resize", updateMobileViewportHeight);
 setSidebarOpen(false);
 sidebarToggle.addEventListener("click", () => {
   setSidebarOpen(!document.body.classList.contains("sidebar-open"), true);
@@ -93,7 +120,10 @@ sidebar.addEventListener("click", event => {
 });
 modelMode.addEventListener("change", () => setSidebarOpen(false, true));
 window.addEventListener("resize", () => {
-  setSidebarOpen(false);
+  updateMobileViewportHeight();
+  if (!window.matchMedia("(max-width: 700px)").matches) {
+    setSidebarOpen(false);
+  }
 });
 
 function setAssistantState(state, label) {
@@ -113,7 +143,7 @@ function updateWakeWordButton(starting = false) {
     : !wakeWordEnabled
       ? "Off"
       : wakeCaptureMode
-        ? "Speak now"
+        ? (isRecording ? "Speak now" : "Greeting…")
         : wakeWordActive
           ? "Listening"
           : "Paused";
@@ -256,28 +286,57 @@ function onWakeWordDetected() {
   wakeCaptureMode = true;
   wakeWordRemainder = new Float32Array(0);
   audioChunks = [];
-  recordingStartedAt = Date.now();
   wakeSpeechStartedAt = 0;
   wakeSilenceStartedAt = 0;
   wakeSpeechCandidateFrames = 0;
   wakeAutoStopTriggered = false;
-  isRecording = true;
   updateWakeWordButton();
-  showWakeWordToast("Hey JARVIS heard you. Speak now; sending after 1.2 seconds of silence.");
+  showWakeWordToast("Hey JARVIS heard you. I'll greet you, then listen.");
 
   const socket = wakeWordSocket;
   wakeWordSocket = null;
   socket?.close();
 
-  micButton.classList.add("recording");
-  micIcon.innerHTML = '<path d="M7 7h10v10H7z"/>';
-  micButton.setAttribute("aria-label", "Stop recording");
-  setAssistantState("listening", "Hey JARVIS heard you");
-  setVoiceStatus("Wake word detected. Speak now; I’ll send your message after a pause.", "recording");
+  setAssistantState("speaking", "JARVIS is greeting you");
+  setVoiceStatus("Hey JARVIS heard you. I'll listen right after a quick greeting.", "processing");
+
+  const startWakeCapture = () => {
+    if (!wakeCaptureMode || isRecording) return;
+    recordingStartedAt = Date.now();
+    isRecording = true;
+    updateWakeWordButton();
+    micButton.classList.add("recording");
+    micIcon.innerHTML = '<path d="M7 7h10v10H7z"/>';
+    micButton.setAttribute("aria-label", "Stop recording");
+    setAssistantState("listening", "Hey JARVIS heard you");
+    setVoiceStatus("Speak now; I'll send your message after a pause.", "recording");
+  };
+
+  if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance !== "function") {
+    startWakeCapture();
+    return;
+  }
+
+  window.speechSynthesis.cancel();
+  const greeting = new SpeechSynthesisUtterance("Hello! How can I help?");
+  greeting.lang = "en-US";
+  greeting.rate = 1;
+  const greetingVoice = getPreferredSpeechVoice(greeting.lang);
+  if (greetingVoice) greeting.voice = greetingVoice;
+  greeting.onend = startWakeCapture;
+  greeting.onerror = event => {
+    console.warn("Wake-word greeting issue:", event.error);
+    startWakeCapture();
+  };
+  window.speechSynthesis.resume();
+  window.speechSynthesis.speak(greeting);
 }
 
 async function startWakeWordListener() {
   if (!wakeWordEnabled || wakeWordStarting || wakeWordActive || wakeCaptureMode || isBusy) return;
+  if (window.isSecureContext === false) {
+    throw new Error("Microphone access on phones requires HTTPS; HTTP LAN addresses are blocked by the browser.");
+  }
   if (!navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext)) {
     throw new Error("Wake-word listening is unavailable in this browser.");
   }
@@ -453,7 +512,44 @@ function setBusy(busy) {
   }
 }
 
-function addMessage(role, content, model = null, tier = null, reason = null) {
+async function copyResponseToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (error) {
+      console.warn("Clipboard API unavailable; trying the browser copy fallback:", error);
+    }
+  }
+
+  const field = document.createElement("textarea");
+  field.value = text;
+  field.setAttribute("readonly", "");
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.append(field);
+  field.focus();
+  field.select();
+  field.setSelectionRange(0, field.value.length);
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } finally {
+    field.remove();
+  }
+  if (!copied) throw new Error("Clipboard access is unavailable in this browser.");
+}
+
+function addMessage(
+  role,
+  content,
+  model = null,
+  tier = null,
+  reason = null,
+  sourcePrompt = null,
+  canRegenerate = false
+) {
   welcomeEl.style.display = "none";
 
   const wrapper = document.createElement("div");
@@ -485,6 +581,63 @@ function addMessage(role, content, model = null, tier = null, reason = null) {
     contentWrap.append(meta);
   }
 
+  if (role === "assistant") {
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+
+    const speakButton = document.createElement("button");
+    speakButton.type = "button";
+    speakButton.className = "message-action-button";
+    speakButton.textContent = "Speak";
+    speakButton.setAttribute("aria-label", "Speak this response aloud");
+    speakButton.addEventListener("click", () => {
+      if (wakeWordActive) {
+        stopWakeWordListener();
+        updateWakeWordButton();
+      }
+      if (!speakReply(content, true)) {
+        setVoiceStatus("Speech output is unavailable in this browser.", "error");
+      }
+    });
+    actions.append(speakButton);
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "message-action-button";
+    copyButton.textContent = "Copy";
+    copyButton.setAttribute("aria-label", "Copy this response");
+    copyButton.addEventListener("click", async () => {
+      try {
+        await copyResponseToClipboard(content);
+        copyButton.textContent = "Copied";
+        setTimeout(() => {
+          copyButton.textContent = "Copy";
+        }, 1500);
+      } catch (error) {
+        console.error("Could not copy response:", error);
+        setVoiceStatus("Could not copy response to clipboard.", "error");
+      }
+    });
+    actions.append(copyButton);
+
+    if (canRegenerate && sourcePrompt && model !== "macOS") {
+      const redoButton = document.createElement("button");
+      redoButton.type = "button";
+      redoButton.className = "message-action-button";
+      redoButton.textContent = "Redo";
+      redoButton.setAttribute("aria-label", "Regenerate this response");
+      redoButton.addEventListener("click", () => {
+        void sendMessage(sourcePrompt, {
+          regenerate: true,
+          responseElement: wrapper
+        });
+      });
+      actions.append(redoButton);
+    }
+
+    contentWrap.append(actions);
+  }
+
   wrapper.append(avatar, contentWrap);
   messagesEl.appendChild(wrapper);
   wrapper.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -507,6 +660,30 @@ function hideTyping() {
 function loadSpeechVoices() {
   if (!("speechSynthesis" in window)) return;
   speechVoices = window.speechSynthesis.getVoices();
+  const selectedVoice = localStorage.getItem(SPEECH_VOICE_KEY) || "";
+  speechVoiceSelect.replaceChildren(new Option("System default", ""));
+
+  speechVoices.forEach(voice => {
+    const option = new Option(`${voice.name} (${voice.lang})`, voice.voiceURI);
+    speechVoiceSelect.add(option);
+  });
+
+  if (selectedVoice && !speechVoices.some(voice => voice.voiceURI === selectedVoice)) {
+    speechVoiceSelect.add(new Option("Saved voice unavailable", selectedVoice));
+  }
+  speechVoiceSelect.value = selectedVoice;
+}
+
+function getPreferredSpeechVoice(language) {
+  loadSpeechVoices();
+  const selectedVoiceUri = speechVoiceSelect.value;
+  if (!selectedVoiceUri) return null;
+
+  const languagePrefix = language.toLowerCase().split("-")[0];
+  return speechVoices.find(voice =>
+    voice.voiceURI === selectedVoiceUri &&
+    voice.lang.toLowerCase().startsWith(languagePrefix)
+  ) || null;
 }
 
 function detectSpeechLanguage(text) {
@@ -515,19 +692,15 @@ function detectSpeechLanguage(text) {
   return cyrillic > latin ? "ru-RU" : "en-US";
 }
 
-function speakReply(text) {
-  if (!voiceEnabled || !("speechSynthesis" in window) || !text) return false;
+function speakReply(text, force = false) {
+  if ((!voiceEnabled && !force) || !("speechSynthesis" in window) || !text) return false;
 
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   wakeReplyInProgress = true;
   const language = detectSpeechLanguage(text);
   utterance.lang = language;
-  loadSpeechVoices();
-
-  const matchingVoice = speechVoices.find(voice =>
-    voice.lang.toLowerCase().startsWith(language.slice(0, 2).toLowerCase())
-  );
+  const matchingVoice = getPreferredSpeechVoice(language);
   if (matchingVoice) utterance.voice = matchingVoice;
 
   utterance.rate = 1;
@@ -555,6 +728,9 @@ if ("speechSynthesis" in window) {
   loadSpeechVoices();
   window.speechSynthesis.onvoiceschanged = loadSpeechVoices;
 }
+speechVoiceSelect.addEventListener("change", () => {
+  localStorage.setItem(SPEECH_VOICE_KEY, speechVoiceSelect.value);
+});
 
 async function checkHealth() {
   try {
@@ -608,8 +784,23 @@ async function loadHistory() {
 
     if (Array.isArray(data.messages) && data.messages.length) {
       welcomeEl.style.display = "none";
-      data.messages.forEach(message => {
-        addMessage(message.role, message.content, message.model);
+      let sourcePrompt = null;
+      data.messages.forEach((message, index) => {
+        if (message.role === "user") {
+          sourcePrompt = message.content;
+          addMessage(message.role, message.content, message.model);
+          return;
+        }
+        addMessage(
+          message.role,
+          message.content,
+          message.model,
+          null,
+          null,
+          sourcePrompt,
+          index === data.messages.length - 1
+        );
+        sourcePrompt = null;
       });
     }
   } catch (error) {
@@ -676,9 +867,12 @@ async function sendMessage(message, options = {}) {
   if (!cleanMessage || isBusy) return;
 
   const fromVoice = options.fromVoice === true;
-  addMessage("user", cleanMessage);
-  input.value = "";
-  input.style.height = "auto";
+  const regenerate = options.regenerate === true;
+  if (!regenerate) {
+    addMessage("user", cleanMessage);
+    input.value = "";
+    input.style.height = "auto";
+  }
 
   setBusy(true);
   setAssistantState("thinking", fromVoice ? "I heard you. Thinking…" : "Working on your request");
@@ -692,7 +886,8 @@ async function sendMessage(message, options = {}) {
       body: JSON.stringify({
         session_id: sessionId,
         message: cleanMessage,
-        model_mode: modelMode.value
+        model_mode: modelMode.value,
+        regenerate
       })
     });
 
@@ -709,7 +904,16 @@ async function sendMessage(message, options = {}) {
       throw new Error(data.detail || "JARVIS could not process that request.");
     }
 
-    addMessage("assistant", data.reply, data.model, data.tier, data.routing_reason);
+    if (regenerate) options.responseElement?.remove();
+    addMessage(
+      "assistant",
+      data.reply,
+      data.model,
+      data.tier,
+      data.routing_reason,
+      cleanMessage,
+      true
+    );
     setVoiceStatus(fromVoice ? "Voice message sent · JARVIS replied" : "Ready · English and Russian voice input", "success");
     if (fromVoice) speakReply(data.reply);
   } catch (error) {
@@ -832,6 +1036,9 @@ function encodeWav(samples, sampleRate) {
 
 async function startRecording() {
   if (isBusy || isRecording) return;
+  if (window.isSecureContext === false) {
+    throw new Error("Microphone access on phones requires HTTPS; HTTP LAN addresses are blocked by the browser.");
+  }
   if (!navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext)) {
     throw new Error("Microphone recording is unavailable in this browser. Try a recent Safari or Chrome version.");
   }

@@ -1242,6 +1242,31 @@ kbd {
   overflow-wrap: anywhere;
 }
 
+.message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.message-action-button {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: #b7c5d9;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.message-action-button:hover {
+  border-color: var(--line-strong);
+  color: #e8effa;
+  background: rgba(255,255,255,.06);
+}
+
 .message.user .bubble {
   color: #e7e9ef;
 }
@@ -1641,8 +1666,9 @@ kbd {
     display: flex;
     flex-direction: column;
     min-height: 100vh;
+    min-height: var(--mobile-viewport-height, 100dvh);
     height: 100vh;
-    height: 100dvh;
+    height: var(--mobile-viewport-height, 100dvh);
   }
 
   .sidebar {
@@ -1813,6 +1839,17 @@ kbd {
 
   .messages {
     padding-top: 10px;
+  }
+
+  .message-actions {
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .message-action-button {
+    min-height: 34px;
+    padding-inline: 10px;
+    font-size: 11px;
   }
 
   .bubble {

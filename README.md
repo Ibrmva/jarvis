@@ -7,8 +7,8 @@ JARVIS is a local-first personal AI assistant. Phase 2 routes requests between t
 - **Auto mode:** routes everyday requests to `qwen3:1.7b` and coding / reasoning / long requests to `qwen3:4b`. Routing is signal-scored, not a single keyword hit, and every response carries the reason it took that route.
 - **Manual Fast and Advanced modes** in the interface. A manual choice always wins over the router.
 - **One conversation across models:** both tiers receive the same recent history, so switching tiers does not start a new chat. Each stored message keeps the `model` that produced it.
-- **Voice in, voice out:** `/api/transcribe` runs `whisper-cli` (whisper.cpp) locally for speech-to-text; replies are spoken with the browser's `speechSynthesis`.
-- **Optional wake word:** enable **Hey JARVIS** in the sidebar for local, always-on wake-word detection. Wait for the on-screen detection notice, then speak your request; it is sent after 1.2 seconds of silence. If no speech follows within 8 seconds, JARVIS discards the empty capture and listens again. Wake-word detection pauses while JARVIS transcribes and replies, then resumes. The browser streams microphone frames only to the local backend, and the detector model is downloaded on first use. Listening is off by default and pauses when the browser tab is backgrounded.
+- **Voice in, voice out:** `/api/transcribe` runs `whisper-cli` (whisper.cpp) locally for speech-to-text; replies are spoken with the browser's `speechSynthesis`. Assistant responses can be spoken or copied, and the latest response can be regenerated from its message controls.
+- **Optional wake word:** enable **Hey JARVIS** in the sidebar for local, always-on wake-word detection. When detected, JARVIS gives a brief spoken greeting, then listens for your request; it is sent after 1.2 seconds of silence. If no speech follows within 8 seconds, JARVIS discards the empty capture and listens again. Wake-word detection pauses while JARVIS transcribes and replies, then resumes. The browser streams microphone frames only to the local backend, and the detector model is downloaded on first use. Listening is off by default and pauses when the browser tab is backgrounded.
 - **Local command execution:** a fixed allowlist of `open …` phrases launches sites and apps (`open youtube`, `открой телеграм`, `найди на youtube …`). No shell, no arbitrary argv.
 - **SQLite migration** adds a `model` column without deleting existing messages.
 - **No cloud API is called by the backend.** `OLLAMA_KEEP_ALIVE=0` unloads a model after each reply (saves RAM, costs a reload next turn); use `5m` to keep it warm.
@@ -16,7 +16,7 @@ JARVIS is a local-first personal AI assistant. Phase 2 routes requests between t
 
 ## Requirements
 
-- Python **3.10+** (the code uses `str | None` and `list[dict]`)
+- Python **3.10 through 3.14** (Python 3.15 is not yet supported by the ONNX Runtime dependency)
 - [Ollama](https://ollama.com) on `127.0.0.1:11434`
 - `whisper-cli` from whisper.cpp **for voice input only** (`brew install whisper.cpp` on macOS; build from source on Linux)
 - `openwakeword` and ONNX Runtime (installed from `requirements.txt`) for wake-word detection
@@ -24,9 +24,9 @@ JARVIS is a local-first personal AI assistant. Phase 2 routes requests between t
 
 ## Setup
 
-The setup script supports macOS and Linux. It can clone the repository, create
-the Python environment, install dependencies, configure `.env`, install Ollama
-and whisper.cpp through Homebrew when available, check/start Ollama, pull the
+The setup script supports macOS and Linux. It can clone the repository, install
+Homebrew if needed, create the Python environment, install dependencies,
+configure `.env`, install Ollama and whisper.cpp, check/start Ollama, pull the
 configured models, fetch the Whisper model, and launch JARVIS:
 
 ```bash
@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/Ibrmva/jarvis/main/scripts/setup.sh
 
 By default, this clones into `./jarvis`. To choose another directory, set
 `JARVIS_DIR`; to skip downloading Ollama models, set
-`JARVIS_SKIP_MODEL_PULL=1`. If Homebrew is unavailable, install Ollama from
+`JARVIS_SKIP_MODEL_PULL=1`. If Homebrew installation fails, install Ollama from
 [ollama.com/download](https://ollama.com/download); on Linux, install
 whisper.cpp separately to enable voice input. The script reads `FAST_MODEL`,
 `ADVANCED_MODEL`, and `OLLAMA_BASE_URL` from `.env` and preserves an existing
@@ -74,7 +74,13 @@ uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 
 Open http://127.0.0.1:8000
 
-> The API has no authentication. It is meant to be bound to loopback only — do not expose it on `0.0.0.0` without putting an authenticating reverse proxy in front of it.
+To access JARVIS from another device on your private network, bind it to the network interfaces and open `http://<your-computer's-LAN-IP>:8000` on that device:
+
+```bash
+JARVIS_HOST=0.0.0.0 ./scripts/setup.sh
+```
+
+If starting Uvicorn manually, use `--host 0.0.0.0` instead of `--host 127.0.0.1`. Find the computer's LAN IP in its network settings. The API has no authentication, so only do this on a trusted private network; never port-forward it or expose it to the internet. Microphone and wake-word access from other devices may also require HTTPS, depending on the browser.
 
 ## Configuration
 
@@ -95,6 +101,7 @@ All settings come from `.env` (see `.env.example`); the defaults live in `backen
 
 ## Troubleshooting
 
+- **No matching distribution found for `onnxruntime`** — use Python 3.10 through 3.14. Python 3.15 does not yet have a compatible ONNX Runtime package; setup selects an older installed Python when available. If an existing `.venv` was created with Python 3.15, remove it and rerun setup.
 - **`Whisper model not found: …/models/whisper/ggml-base-q5_1.bin`** on voice input — the weights are not in git. Run `./scripts/fetch_models.sh` (57 MB, checksum-verified), or point `WHISPER_MODEL_PATH` at an existing GGML `.bin`.
 - **`whisper-cli was not found on PATH`** — install whisper.cpp (`brew install whisper.cpp` on macOS, build from source on Linux) or set `WHISPER_EXECUTABLE` to the binary's full path.
 - **Wake-word listening fails to start** — allow microphone access, keep JARVIS open in a secure browser context (localhost or HTTPS), and ensure the first-run model download can reach GitHub. Microphone audio is processed by the local JARVIS backend.

@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#080b12" />
   <meta name="description" content="JARVIS — your private, local-first AI assistant." />
   <title>JARVIS — Personal AI</title>
-  <link rel="stylesheet" href="/static/styles.css?v=9" />
+  <link rel="stylesheet" href="/static/styles.css?v=14" />
 
   <style>
     /* Snow Vision navigation */
@@ -202,6 +202,13 @@
           <span class="cap-icon">⌁</span>
           <span>English & Russian voice</span>
           <span class="cap-check">●</span>
+        </div>
+        <label class="field-label" for="speech-voice-select">Spoken voice</label>
+        <div class="select-wrap">
+          <select id="speech-voice-select" aria-label="Spoken voice">
+            <option value="">System default</option>
+          </select>
+          <span class="select-chevron">⌄</span>
         </div>
         <div class="capability wake-word-control">
           <span class="cap-icon">◉</span>
@@ -486,7 +493,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=19"></script>
 
   <script>
     (() => {
