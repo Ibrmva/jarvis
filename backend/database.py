@@ -11,12 +11,14 @@ WAL + busy_timeout are set because `main.py` performs these writes from the
 threadpool, so the chat writer and the transcriber can overlap.
 """
 
+import json
 import sqlite3
 from contextlib import contextmanager
 
 from backend.config import DATABASE_PATH
 
 BUSY_TIMEOUT_MS = 5000
+MAX_HISTORY_ATTACHMENT_BYTES = 12 * 1024 * 1024
 
 
 @contextmanager
@@ -25,7 +27,6 @@ def get_connection():
     conn = sqlite3.connect(DATABASE_PATH, timeout=BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         yield conn
         conn.commit()
@@ -38,17 +39,23 @@ def get_connection():
 
 def initialize_database() -> None:
     with get_connection() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
             content TEXT NOT NULL,
             model TEXT,
+            attachments TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )""")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "model" not in columns:
             conn.execute("ALTER TABLE messages ADD COLUMN model TEXT")
+        if "attachments" not in columns:
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'"
+            )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_id_id ON messages(session_id, id)")
 
 
@@ -61,19 +68,52 @@ def get_history(
     with get_connection() as conn:
         if exclude_message_id is None:
             rows = conn.execute(
-                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                "SELECT role, content, attachments FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
                 (session_id, limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 """
-                SELECT role, content FROM messages
+                SELECT role, content, attachments FROM messages
                 WHERE session_id = ? AND id != ?
                 ORDER BY id DESC LIMIT ?
                 """,
                 (session_id, exclude_message_id, limit),
             ).fetchall()
-    return [dict(row) for row in reversed(rows)]
+    history = []
+    selected_attachments = []
+    remaining_attachment_bytes = MAX_HISTORY_ATTACHMENT_BYTES
+    for row in rows:
+        attachments = json.loads(row["attachments"] or "[]")
+        attachment_size = sum(
+            len(item.get("content", "").encode("utf-8"))
+            for item in attachments
+        )
+        if attachment_size > remaining_attachment_bytes:
+            attachments = []
+        else:
+            remaining_attachment_bytes -= attachment_size
+        selected_attachments.append((row, attachments))
+
+    for row, attachments in reversed(selected_attachments):
+        message = {"role": row["role"], "content": row["content"]}
+        documents = [
+            item for item in attachments
+            if item.get("kind") == "text"
+        ]
+        if documents:
+            message["content"] += "\n\n" + "\n\n".join(
+                f"[Attached document: {item['name']}]\n{item['content']}"
+                for item in documents
+            )
+        images = [
+            item["content"] for item in attachments
+            if item.get("kind") == "image"
+        ]
+        if images:
+            message["images"] = images
+        history.append(message)
+    return history
 
 
 def get_latest_exchange(session_id: str) -> dict | None:
@@ -127,9 +167,9 @@ def get_display_history(session_id: str, limit: int = 100) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT role, content, model, created_at
+            SELECT role, content, model, created_at, attachments
             FROM (
-                SELECT id, role, content, model, created_at
+                SELECT id, role, content, model, created_at, attachments
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY id DESC
@@ -139,7 +179,26 @@ def get_display_history(session_id: str, limit: int = 100) -> list[dict]:
             """,
             (session_id, limit),
         ).fetchall()
-    return [dict(row) for row in rows]
+    messages = []
+    remaining_preview_chars = 2 * 1024 * 1024
+    for row in reversed(rows):
+        message = dict(row)
+        stored_attachments = json.loads(message.pop("attachments") or "[]")
+        message_attachments = []
+        for item in stored_attachments:
+            attachment = {
+                "name": item["name"],
+                "kind": item["kind"],
+                "mime": item.get("mime", ""),
+            }
+            thumbnail = item.get("thumbnail", "")
+            if thumbnail and len(thumbnail) <= remaining_preview_chars:
+                attachment["thumbnail"] = thumbnail
+                remaining_preview_chars -= len(thumbnail)
+            message_attachments.append(attachment)
+        message["attachments"] = message_attachments
+        messages.append(message)
+    return list(reversed(messages))
 
 
 def get_recent_sessions(limit: int = 50) -> list[dict]:
@@ -160,11 +219,18 @@ def get_recent_sessions(limit: int = 50) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def save_message(session_id: str, role: str, content: str, model: str | None = None) -> None:
+def save_message(
+    session_id: str,
+    role: str,
+    content: str,
+    model: str | None = None,
+    attachments: list[dict] | None = None,
+) -> None:
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, model) VALUES (?, ?, ?, ?)",
-            (session_id, role, content, model),
+            "INSERT INTO messages (session_id, role, content, model, attachments) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (session_id, role, content, model, json.dumps(attachments or [], ensure_ascii=False)),
         )
 
 

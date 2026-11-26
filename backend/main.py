@@ -1,9 +1,14 @@
 
-from contextlib import asynccontextmanager
-from uuid import UUID
+import base64
+import binascii
+import json
 import logging
 import re
 import subprocess
+from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
+from uuid import UUID
+from typing import Literal
 
 from fastapi import (
     FastAPI,
@@ -13,10 +18,10 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.config import (
     JARVIS_NAME,
@@ -38,12 +43,15 @@ from backend.database import (
 from backend.model_router import choose_model
 from backend.ollama_client import (
     check_ollama,
+    clean_assistant_text,
     generate_reply,
     get_available_models,
     OllamaUnavailable,
     resolve_website_url,
+    stream_reply,
 )
 from backend.speech_recognition import (
+    MAX_AUDIO_SIZE,
     transcribe_audio,
     SpeechRecognitionError,
 )
@@ -66,6 +74,21 @@ logger = logging.getLogger("jarvis")
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
 
+def is_same_origin(origin: str, host: str) -> bool:
+    try:
+        parsed_origin = urlsplit(origin)
+    except ValueError:
+        return False
+    return (
+        parsed_origin.scheme in {"http", "https"}
+        and bool(parsed_origin.netloc)
+        and not parsed_origin.path
+        and not parsed_origin.query
+        and not parsed_origin.fragment
+        and parsed_origin.netloc.lower() == host.lower()
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize_database()
@@ -81,19 +104,155 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    origin = request.headers.get("origin")
+    content_length = request.headers.get("content-length")
+    oversized_chat = False
+    if request.url.path in {"/api/chat", "/api/chat/stream"} and content_length:
+        try:
+            oversized_chat = int(content_length) > 13_000_000
+        except ValueError:
+            oversized_chat = True
+    if (
+        origin
+        and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and not is_same_origin(origin, request.headers.get("host", ""))
+    ):
+        response = JSONResponse(
+            status_code=403,
+            content={"detail": "Cross-origin requests are not allowed."},
+        )
+    elif oversized_chat:
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": "Chat request exceeds the 13 MB limit."},
+        )
+    else:
+        response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(self), microphone=(self), geolocation=()",
+    )
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'self'; object-src 'none'; "
+        "frame-ancestors 'none'; form-action 'self'; "
+        "script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; "
+        "style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "
+        "connect-src 'self' ws: wss: https://cdn.jsdelivr.net "
+        "https://storage.googleapis.com; worker-src 'self' blob:; "
+        "font-src 'self' data:",
+    )
+    return response
+
+
+class ChatAttachment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+    kind: Literal["image", "text"]
+    mime: str = Field(max_length=100)
+    content: str = Field(max_length=11_200_000)
+    thumbnail: str = Field(default="", max_length=128 * 1024)
+
+
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     session_id: str = Field(min_length=1, max_length=80)
-    message: str = Field(min_length=1, max_length=12000)
+    message: str = Field(default="", max_length=12000)
     regenerate: bool = False
+    reasoning: bool = False
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     model_mode: str = Field(
         default="auto",
         pattern="^(auto|fast|advanced)$",
     )
 
+    @model_validator(mode="after")
+    def validate_attachments(self):
+        if sum(
+            len(item.content) + len(item.thumbnail)
+            for item in self.attachments
+        ) > 12_000_000:
+            raise ValueError("Attachments exceed the total request size limit.")
+
+        image_bytes = 0
+        text_bytes = 0
+        thumbnail_bytes = 0
+        for attachment in self.attachments:
+            if (
+                "/" in attachment.name
+                or "\\" in attachment.name
+                or any(ord(char) < 32 for char in attachment.name)
+            ):
+                raise ValueError("Attachment filenames must be plain filenames.")
+
+            extension = "." + attachment.name.rsplit(".", 1)[-1].lower() if "." in attachment.name else ""
+            if attachment.kind == "image":
+                mime_extensions = {
+                    "image/jpeg": {".jpg", ".jpeg"},
+                    "image/png": {".png"},
+                    "image/webp": {".webp"},
+                }
+                if extension not in mime_extensions.get(attachment.mime, set()):
+                    raise ValueError("Only JPEG, PNG, and WebP images are supported.")
+                try:
+                    image = base64.b64decode(attachment.content, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise ValueError("An attached image is not valid base64 data.") from exc
+                valid_signature = (
+                    (attachment.mime == "image/jpeg" and image.startswith(b"\xff\xd8\xff"))
+                    or (attachment.mime == "image/png" and image.startswith(b"\x89PNG\r\n\x1a\n"))
+                    or (
+                        attachment.mime == "image/webp"
+                        and len(image) >= 12
+                        and image.startswith(b"RIFF")
+                        and image[8:12] == b"WEBP"
+                    )
+                )
+                if not valid_signature:
+                    raise ValueError("The image content does not match its file type.")
+                image_bytes += len(image)
+                if attachment.thumbnail:
+                    try:
+                        thumbnail = base64.b64decode(
+                            attachment.thumbnail,
+                            validate=True,
+                        )
+                    except (binascii.Error, ValueError) as exc:
+                        raise ValueError("An image preview is not valid base64 data.") from exc
+                    if not thumbnail.startswith(b"\xff\xd8\xff"):
+                        raise ValueError("Image previews must be JPEG thumbnails.")
+                    thumbnail_bytes += len(thumbnail)
+            else:
+                if attachment.thumbnail:
+                    raise ValueError("Text documents cannot have image previews.")
+                if extension not in {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".xml", ".log"}:
+                    raise ValueError("Only plain-text documents are supported.")
+                if "\0" in attachment.content:
+                    raise ValueError("Text documents must contain plain text.")
+                text_bytes += len(attachment.content.encode("utf-8"))
+
+        if image_bytes > 8 * 1024 * 1024:
+            raise ValueError("Attached images may total at most 8 MB.")
+        if text_bytes > 500 * 1024:
+            raise ValueError("Text documents may total at most 500 KB.")
+        if thumbnail_bytes > 480 * 1024:
+            raise ValueError("Image previews exceed the total size limit.")
+        return self
+
 
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
+    thinking: str = ""
     model: str
     tier: str
     routing_reason: str
@@ -185,7 +344,12 @@ async def speech_to_text(audio: UploadFile = File(...)):
     filename = audio.filename or "recording.wav"
 
     try:
-        audio_data = await audio.read()
+        audio_data = await audio.read(MAX_AUDIO_SIZE + 1)
+        if len(audio_data) > MAX_AUDIO_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail="Audio file exceeds the 20 MB limit.",
+            )
 
         result = await run_in_threadpool(
             transcribe_audio,
@@ -215,6 +379,15 @@ async def speech_to_text(audio: UploadFile = File(...)):
 
 @app.websocket("/api/wake-word")
 async def wake_word(websocket: WebSocket):
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host", "")
+    if origin and not is_same_origin(origin, host):
+        await websocket.close(
+            code=1008,
+            reason="Cross-origin WebSocket connections are not allowed.",
+        )
+        return
+
     await websocket.accept()
     model_loaded = False
 
@@ -253,6 +426,32 @@ async def wake_word(websocket: WebSocket):
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    return await _chat(request, streaming=False)
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    result = await _chat(request, streaming=True)
+    if isinstance(result, ChatResponse):
+        async def action_events():
+            yield json.dumps({"type": "content", "text": result.reply}) + "\n"
+            yield json.dumps({
+                "type": "done",
+                "reply": result.reply,
+                "thinking": result.thinking,
+                "model": result.model,
+                "tier": result.tier,
+                "routing_reason": result.routing_reason,
+            }) + "\n"
+
+        return StreamingResponse(action_events(), media_type="application/x-ndjson")
+    return result
+
+
+async def _chat(
+    request: ChatRequest,
+    streaming: bool,
+) -> ChatResponse | StreamingResponse:
     try:
         UUID(request.session_id)
 
@@ -263,12 +462,13 @@ async def chat(request: ChatRequest):
         ) from exc
 
     user_message = request.message.strip()
-
-    if not user_message:
+    if not user_message and not request.attachments:
         raise HTTPException(
             status_code=400,
             detail="Message cannot be empty.",
         )
+    if not user_message:
+        user_message = "Please analyze the attached file(s)."
 
     previous_exchange = None
     if request.regenerate:
@@ -284,7 +484,15 @@ async def chat(request: ChatRequest):
                 detail="macOS actions cannot be repeated with regenerate.",
             )
     else:
-        save_message(request.session_id, "user", user_message)
+        save_message(
+            request.session_id,
+            "user",
+            user_message,
+            attachments=[
+                attachment.model_dump()
+                for attachment in request.attachments
+            ],
+        )
 
     # Execute recognized macOS actions before calling the AI model.
     command_result = None
@@ -320,11 +528,12 @@ async def chat(request: ChatRequest):
     # Normal AI conversation.
     try:
         available = await get_available_models()
-        route = choose_model(user_message, request.model_mode)
+        effective_mode = "advanced" if request.reasoning else request.model_mode
+        route = choose_model(user_message, effective_mode)
         selected_model = route.model
 
         if selected_model not in available:
-            if request.model_mode == "advanced":
+            if request.model_mode == "advanced" or request.reasoning:
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -383,7 +592,99 @@ async def chat(request: ChatRequest):
             ),
         )
 
-        reply = await generate_reply(history_items, selected_model)
+        if streaming:
+            async def stream_events():
+                reply_parts: list[str] = []
+                thinking_parts: list[str] = []
+                yield json.dumps({
+                    "type": "meta",
+                    "model": selected_model,
+                    "tier": route.tier,
+                    "routing_reason": route.reason,
+                }) + "\n"
+                try:
+                    async for event in stream_reply(
+                        history_items,
+                        selected_model,
+                        reasoning=request.reasoning,
+                    ):
+                        text = event["text"]
+                        if event["type"] == "thinking":
+                            thinking_parts.append(text)
+                        else:
+                            reply_parts.append(text)
+                        yield json.dumps(event, ensure_ascii=False) + "\n"
+
+                    reply = clean_assistant_text("".join(reply_parts))
+                    thinking = clean_assistant_text("".join(thinking_parts))
+                    if not reply and thinking:
+                        reply = thinking
+                        yield json.dumps({
+                            "type": "content",
+                            "text": reply,
+                        }, ensure_ascii=False) + "\n"
+                    if not reply:
+                        raise OllamaUnavailable(
+                            "The local model returned an empty response."
+                        )
+
+                    if previous_exchange:
+                        replaced = replace_latest_assistant(
+                            request.session_id,
+                            previous_exchange["assistant_id"],
+                            reply,
+                            selected_model,
+                        )
+                        if not replaced:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Conversation changed before the response could be regenerated.",
+                            )
+                    else:
+                        save_message(
+                            request.session_id,
+                            "assistant",
+                            reply,
+                            selected_model,
+                        )
+
+                    logger.info(
+                        "session=%s tier=%s model=%s reason=%s",
+                        request.session_id,
+                        route.tier,
+                        selected_model,
+                        route.reason,
+                    )
+                    yield json.dumps({
+                        "type": "done",
+                        "reply": reply,
+                        "thinking": thinking,
+                        "model": selected_model,
+                        "tier": route.tier,
+                        "routing_reason": route.reason,
+                    }, ensure_ascii=False) + "\n"
+                except OllamaUnavailable as exc:
+                    logger.warning("Model unavailable: %s", exc)
+                    yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+                except HTTPException as exc:
+                    yield json.dumps({
+                        "type": "error",
+                        "detail": str(exc.detail),
+                    }) + "\n"
+
+            return StreamingResponse(
+                stream_events(),
+                media_type="application/x-ndjson",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        generated = await generate_reply(
+            history_items,
+            selected_model,
+            reasoning=request.reasoning,
+            return_thinking=True,
+        )
+        reply, thinking = generated
 
         if previous_exchange:
             replaced = replace_latest_assistant(
@@ -416,6 +717,7 @@ async def chat(request: ChatRequest):
         return ChatResponse(
             session_id=request.session_id,
             reply=reply,
+            thinking=thinking,
             model=selected_model,
             tier=route.tier,
             routing_reason=route.reason,

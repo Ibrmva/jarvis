@@ -208,12 +208,12 @@ def execute_command(message: str):
                     ),
                     "action": "open_website",
                 }
-            except (subprocess.SubprocessError, OSError) as exc:
+            except (subprocess.SubprocessError, OSError):
                 return {
                     "reply": (
-                        f"Не удалось открыть {target}: {exc}"
+                        f"Не удалось открыть {target}."
                         if russian
-                        else f"Could not open {target}: {exc}"
+                        else f"Could not open {target}."
                     ),
                     "action": "error",
                 }

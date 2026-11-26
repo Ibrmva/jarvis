@@ -126,6 +126,8 @@ OLLAMA_BASE_URL="$(read_config OLLAMA_BASE_URL)"
 FAST_MODEL="$(read_config FAST_MODEL)"
 ADVANCED_MODEL="$(read_config ADVANCED_MODEL)"
 WHISPER_MODEL_PATH="$(read_config WHISPER_MODEL_PATH)"
+JARVIS_SSL_CERTFILE="$(read_config JARVIS_SSL_CERTFILE)"
+JARVIS_SSL_KEYFILE="$(read_config JARVIS_SSL_KEYFILE)"
 OLLAMA_CLI_HOST="${OLLAMA_BASE_URL#http://}"
 OLLAMA_CLI_HOST="${OLLAMA_CLI_HOST#https://}"
 OLLAMA_CLI_HOST="${OLLAMA_CLI_HOST%/}"
@@ -227,6 +229,18 @@ fi
 
 host="${JARVIS_HOST:-127.0.0.1}"
 port="${JARVIS_PORT:-8000}"
-printf '\nJARVIS is ready at http://%s:%s\n' "$host" "$port"
+tls_args=()
+scheme="http"
+if [[ -n "$JARVIS_SSL_CERTFILE" || -n "$JARVIS_SSL_KEYFILE" ]]; then
+  [[ -n "$JARVIS_SSL_CERTFILE" && -n "$JARVIS_SSL_KEYFILE" ]] \
+    || die "Set both JARVIS_SSL_CERTFILE and JARVIS_SSL_KEYFILE in .env to enable HTTPS."
+  [[ -f "$JARVIS_SSL_CERTFILE" ]] \
+    || die "TLS certificate not found: $JARVIS_SSL_CERTFILE"
+  [[ -f "$JARVIS_SSL_KEYFILE" ]] \
+    || die "TLS private key not found: $JARVIS_SSL_KEYFILE"
+  tls_args=(--ssl-certfile "$JARVIS_SSL_CERTFILE" --ssl-keyfile "$JARVIS_SSL_KEYFILE")
+  scheme="https"
+fi
+printf '\nJARVIS is ready at %s://%s:%s\n' "$scheme" "$host" "$port"
 printf 'Press Ctrl+C to stop the app.\n\n'
-.venv/bin/python -m uvicorn backend.main:app --host "$host" --port "$port"
+.venv/bin/python -m uvicorn backend.main:app --host "$host" --port "$port" "${tls_args[@]}"

@@ -1,6 +1,7 @@
 
 import json
 import re
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -59,10 +60,14 @@ async def get_available_models() -> list[str]:
             response.raise_for_status()
             payload = response.json()
 
-            return [
-                item.get("name", "")
-                for item in payload.get("models", [])
-            ]
+            models = payload.get("models") if isinstance(payload, dict) else None
+            if not isinstance(models, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("name"), str)
+                for item in models
+            ):
+                raise OllamaUnavailable("Ollama returned an invalid model list.")
+            return [item["name"] for item in models]
 
     except (httpx.HTTPError, ValueError) as exc:
         raise OllamaUnavailable(
@@ -89,8 +94,10 @@ async def check_ollama(
 
 async def generate_reply(
     history: list[dict],
-    model: str
-) -> str:
+    model: str,
+    reasoning: bool = False,
+    return_thinking: bool = False,
+) -> str | tuple[str, str]:
 
     messages = [
         {
@@ -104,12 +111,12 @@ async def generate_reply(
         "model": model,
         "messages": messages,
         "stream": False,
-        "think": False,
+        "think": reasoning,
         "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": {
             "temperature": 0.4,
             "num_ctx": NUM_CTX,
-            "num_predict": 512,
+            "num_predict": 2048 if reasoning else 512,
         },
     }
 
@@ -124,21 +131,44 @@ async def generate_reply(
             )
 
             response.raise_for_status()
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise OllamaUnavailable(
+                    "Ollama returned an invalid response."
+                ) from exc
 
-            answer = (
-                payload.get("message", {})
-                .get("content", "")
-                .strip()
+            if (
+                not isinstance(payload, dict)
+                or not isinstance(payload.get("message"), dict)
+            ):
+                raise OllamaUnavailable("Ollama returned an invalid response.")
+
+            message_payload = payload["message"]
+            answer_content = message_payload.get("content", "")
+            if not isinstance(answer_content, str):
+                raise OllamaUnavailable("Ollama returned an invalid response.")
+            answer = answer_content.strip()
+            thinking = (
+                message_payload.get("thinking")
+                or payload.get("thinking")
+                or ""
             )
+            thinking = thinking.strip() if isinstance(thinking, str) else ""
 
             answer = clean_assistant_text(answer)
+            thinking = clean_assistant_text(thinking)
 
             if not answer:
-                raise OllamaUnavailable(
-                    "The local model returned an empty response."
-                )
+                if thinking:
+                    answer = thinking
+                else:
+                    raise OllamaUnavailable(
+                        "The local model returned an empty response."
+                    )
 
+            if return_thinking:
+                return answer, thinking
             return answer
 
     except httpx.ConnectError as exc:
@@ -157,6 +187,106 @@ async def generate_reply(
 
         raise OllamaUnavailable(
             f"Ollama returned an error: {detail}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise OllamaUnavailable(
+            "The connection to Ollama failed while generating a response."
+        ) from exc
+
+
+async def stream_reply(
+    history: list[dict],
+    model: str,
+    reasoning: bool = False,
+) -> AsyncIterator[dict[str, str]]:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        *history,
+    ]
+    body = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "think": reasoning,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": 0.4,
+            "num_ctx": NUM_CTX,
+            "num_predict": 2048 if reasoning else 512,
+        },
+    }
+
+    timeout = httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=6.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=body,
+            ) as response:
+                response.raise_for_status()
+                received_done = False
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise OllamaUnavailable(
+                            "Ollama returned an invalid streaming response."
+                        ) from exc
+
+                    if not isinstance(chunk, dict):
+                        raise OllamaUnavailable(
+                            "Ollama returned an invalid streaming response."
+                        )
+                    if chunk.get("error"):
+                        raise OllamaUnavailable(str(chunk["error"])[:300])
+                    message = chunk.get("message") or {}
+                    if not isinstance(message, dict):
+                        raise OllamaUnavailable(
+                            "Ollama returned an invalid streaming response."
+                        )
+                    thinking = message.get("thinking")
+                    content = message.get("content")
+                    if (
+                        (thinking is not None and not isinstance(thinking, str))
+                        or (content is not None and not isinstance(content, str))
+                    ):
+                        raise OllamaUnavailable(
+                            "Ollama returned an invalid streaming response."
+                        )
+                    if isinstance(thinking, str) and thinking:
+                        yield {"type": "thinking", "text": thinking}
+                    if isinstance(content, str) and content:
+                        yield {"type": "content", "text": content}
+                    done = chunk.get("done", False)
+                    if not isinstance(done, bool):
+                        raise OllamaUnavailable(
+                            "Ollama returned an invalid streaming response."
+                        )
+                    if done:
+                        received_done = True
+                        break
+                if not received_done:
+                    raise OllamaUnavailable(
+                        "Ollama ended the response unexpectedly."
+                    )
+    except httpx.ConnectError as exc:
+        raise OllamaUnavailable(
+            f"Ollama is not running. Open the Ollama app and retry."
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise OllamaUnavailable(
+            "The model took too long to respond. Try a shorter request."
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise OllamaUnavailable(
+            f"Ollama returned an error: {exc.response.text[:300]}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise OllamaUnavailable(
+            "The connection to Ollama failed while streaming a response."
         ) from exc
 
 
@@ -198,11 +328,15 @@ async def resolve_website_url(target: str, model: str) -> str | None:
             response.raise_for_status()
             payload = response.json()
     except (httpx.HTTPError, ValueError) as exc:
-        raise OllamaUnavailable(f"Could not resolve the requested website: {exc}") from exc
+        raise OllamaUnavailable(
+            "Could not resolve the requested website."
+        ) from exc
 
     if not isinstance(payload, dict) or not isinstance(payload.get("message"), dict):
         return None
     content = payload["message"].get("content", "")
+    if not isinstance(content, str):
+        return None
     try:
         result = json.loads(content)
     except (TypeError, json.JSONDecodeError):

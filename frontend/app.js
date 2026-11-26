@@ -24,6 +24,9 @@ const welcomeEl = document.getElementById("welcome");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("message-input");
 const sendButton = document.getElementById("send-button");
+const attachmentInput = document.getElementById("attachment-input");
+const attachmentList = document.getElementById("attachment-list");
+const addAttachmentButton = document.getElementById("add-attachment-button");
 const micButton = document.getElementById("mic-button");
 const micIcon = document.getElementById("mic-icon");
 const voiceStatus = document.getElementById("voice-status");
@@ -36,6 +39,10 @@ const statusDot = document.getElementById("status-dot");
 const connectionLabel = document.getElementById("connection-label");
 const modelLabel = document.getElementById("model-label");
 const modelMode = document.getElementById("model-mode");
+const modelModeSettings = document.getElementById("model-mode-settings");
+const reasoningButton = document.querySelector(".composer-pill");
+let reasoningEnabled = localStorage.getItem("jarvis_reasoning_enabled") === "true";
+let reasoningPreviousMode = "auto";
 const recentChatsEl = document.getElementById("recent-chats");
 const sidebar = document.getElementById("sidebar");
 const sidebarToggle = document.getElementById("sidebar-toggle");
@@ -54,6 +61,23 @@ let audioChunks = [];
 let recordingStartedAt = 0;
 let isRecording = false;
 let isBusy = false;
+let selectedAttachments = [];
+const attachmentPreviewSupport = fetch("/openapi.json")
+  .then(response => response.ok ? response.json() : null)
+  .then(schema => {
+    const requestSchema = schema?.components?.schemas?.ChatRequest;
+    const attachmentRef = requestSchema?.properties?.attachments?.items?.$ref;
+    const attachmentName = attachmentRef?.split("/").pop();
+    return Boolean(
+      attachmentName
+      && schema.components.schemas[attachmentName]?.properties?.thumbnail?.maxLength
+        >= 128 * 1024
+    );
+  })
+  .catch(error => {
+    console.warn("Could not check attachment preview support:", error);
+    return false;
+  });
 let voiceEnabled = localStorage.getItem(VOICE_ENABLED_KEY) !== "false";
 let speechVoices = [];
 let wakeWordEnabled = false;
@@ -73,14 +97,38 @@ let wakeWordToastTimer = null;
 const MAX_RECORDING_SECONDS = 60;
 const WAKEWORD_FRAME_SAMPLES = 1280;
 
+const themeToggle = document.getElementById("theme-toggle");
+const savedTheme = localStorage.getItem("jarvis_theme");
+const initialTheme = savedTheme === "light" || savedTheme === "dark"
+  ? savedTheme
+  : "dark";
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("jarvis_theme", theme);
+  themeToggle?.setAttribute(
+    "aria-label",
+    theme === "dark" ? "Switch to light theme" : "Switch to dark theme"
+  );
+  themeToggle?.setAttribute(
+    "title",
+    theme === "dark" ? "Switch to light theme" : "Switch to dark theme"
+  );
+}
+
+applyTheme(initialTheme);
+themeToggle?.addEventListener("click", () => {
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+});
+
 function setSidebarOpen(open, restoreFocus = false) {
   const isMobile = window.matchMedia("(max-width: 700px)").matches;
-  if (open && !isMobile) return;
 
-  document.body.classList.toggle("sidebar-open", open);
-  sidebar.classList.toggle("is-open", open);
-  sidebar.inert = isMobile && !open;
-  mainPanel.inert = open;
+  document.body.classList.toggle("sidebar-open", isMobile && open);
+  document.body.classList.toggle("sidebar-collapsed", !open && !isMobile);
+  sidebar.classList.toggle("is-open", isMobile && open);
+  sidebar.inert = !open;
+  mainPanel.inert = isMobile && open;
   if (isMobile) {
     sidebar.setAttribute("aria-hidden", String(!open));
   } else {
@@ -96,35 +144,172 @@ function setSidebarOpen(open, restoreFocus = false) {
   }
 }
 
-function updateMobileViewportHeight() {
-  const viewportHeight = window.visualViewport?.height;
-  if (viewportHeight && window.matchMedia("(max-width: 700px)").matches) {
-    document.documentElement.style.setProperty(
-      "--mobile-viewport-height",
-      `${Math.round(viewportHeight)}px`
-    );
-  } else {
-    document.documentElement.style.removeProperty("--mobile-viewport-height");
-  }
-}
-
-updateMobileViewportHeight();
-window.visualViewport?.addEventListener("resize", updateMobileViewportHeight);
-setSidebarOpen(false);
+setSidebarOpen(true);
 sidebarToggle.addEventListener("click", () => {
   setSidebarOpen(!document.body.classList.contains("sidebar-open"), true);
 });
 sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false, true));
-sidebar.addEventListener("click", event => {
-  if (event.target.closest("button")) setSidebarOpen(false, true);
-});
-modelMode.addEventListener("change", () => setSidebarOpen(false, true));
-window.addEventListener("resize", () => {
-  updateMobileViewportHeight();
-  if (!window.matchMedia("(max-width: 700px)").matches) {
-    setSidebarOpen(false);
+
+const sidebarClose = document.getElementById("sidebar-close");
+sidebarClose?.addEventListener("click", () => setSidebarOpen(false, true));
+const desktopSidebarToggle = document.getElementById("desktop-sidebar-toggle");
+desktopSidebarToggle?.addEventListener("click", () => setSidebarOpen(true, true));
+
+const settingsDrawer = document.getElementById("settings-drawer");
+const settingsBackdrop = document.getElementById("settings-backdrop");
+const settingsButton = document.getElementById("settings-button");
+const settingsClose = document.getElementById("settings-close");
+
+function setSettingsOpen(open) {
+  settingsDrawer?.classList.toggle("open", open);
+  settingsBackdrop?.classList.toggle("open", open);
+  settingsDrawer?.setAttribute("aria-hidden", String(!open));
+  if (open) settingsClose?.focus();
+  else settingsButton?.focus();
+}
+
+settingsButton?.addEventListener("click", () => setSettingsOpen(true));
+settingsClose?.addEventListener("click", () => setSettingsOpen(false));
+settingsBackdrop?.addEventListener("click", () => setSettingsOpen(false));
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && settingsDrawer?.classList.contains("open")) {
+    setSettingsOpen(false);
   }
 });
+
+const snowModal = document.getElementById("snow-modal");
+const snowModalOpen = document.getElementById("snow-nav-button");
+const snowModalClose = document.getElementById("snow-modal-close");
+
+function setSnowModalOpen(open) {
+  snowModal?.classList.toggle("open", open);
+  snowModal?.setAttribute("aria-hidden", String(!open));
+  document.body.classList.toggle("snow-modal-open", open);
+  if (open) snowModalClose?.focus();
+  else snowModalOpen?.focus();
+}
+
+snowModalOpen?.addEventListener("click", () => setSnowModalOpen(true));
+snowModalClose?.addEventListener("click", () => setSnowModalOpen(false));
+snowModal?.addEventListener("click", event => {
+  if (event.target === snowModal) setSnowModalOpen(false);
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && snowModal?.classList.contains("open")) {
+    setSnowModalOpen(false);
+  }
+});
+
+const imagePreviewModal = document.getElementById("image-preview-modal");
+const imagePreviewClose = document.getElementById("image-preview-close");
+const imagePreviewImage = document.getElementById("image-preview-image");
+const imagePreviewCaption = document.getElementById("image-preview-caption");
+let imagePreviewTrigger = null;
+let imagePreviewObjectUrl = null;
+
+function openImagePreview(src, name, trigger, revokeOnClose = false) {
+  if (!src) return;
+  imagePreviewImage.src = src;
+  imagePreviewImage.alt = name;
+  imagePreviewCaption.textContent = name;
+  imagePreviewTrigger = trigger;
+  imagePreviewObjectUrl = revokeOnClose ? src : null;
+  imagePreviewModal.classList.add("open");
+  imagePreviewModal.setAttribute("aria-hidden", "false");
+  imagePreviewClose.focus();
+}
+
+function closeImagePreview() {
+  imagePreviewModal.classList.remove("open");
+  imagePreviewModal.setAttribute("aria-hidden", "true");
+  imagePreviewImage.removeAttribute("src");
+  imagePreviewImage.alt = "";
+  imagePreviewCaption.textContent = "";
+  if (imagePreviewObjectUrl) URL.revokeObjectURL(imagePreviewObjectUrl);
+  imagePreviewObjectUrl = null;
+  if (imagePreviewTrigger?.isConnected) imagePreviewTrigger.focus();
+  imagePreviewTrigger = null;
+}
+
+imagePreviewClose?.addEventListener("click", closeImagePreview);
+imagePreviewModal?.addEventListener("click", event => {
+  if (event.target === imagePreviewModal) closeImagePreview();
+});
+document.addEventListener("keydown", event => {
+  if (!imagePreviewModal?.classList.contains("open")) return;
+  if (event.key === "Escape") closeImagePreview();
+  if (event.key === "Tab") {
+    event.preventDefault();
+    imagePreviewClose.focus();
+  }
+});
+
+const chatSearch = document.getElementById("chat-search");
+const chatSearchClear = document.getElementById("chat-search-clear");
+chatSearch?.addEventListener("input", () => {
+  const query = chatSearch.value.trim().toLowerCase();
+  chatSearchClear.hidden = !query;
+  recentChatsEl.querySelectorAll(".conversation-item").forEach(item => {
+    item.hidden = Boolean(query) && !item.textContent.toLowerCase().includes(query);
+  });
+});
+chatSearchClear?.addEventListener("click", () => {
+  chatSearch.value = "";
+  chatSearch.dispatchEvent(new Event("input"));
+  chatSearch.focus();
+});
+modelMode?.addEventListener("change", () => {
+  if (modelModeSettings) modelModeSettings.value = modelMode.value;
+});
+modelModeSettings?.addEventListener("change", () => {
+  if (modelMode) modelMode.value = modelModeSettings.value;
+});
+
+function updateReasoningButton() {
+  reasoningButton?.classList.toggle("active", reasoningEnabled);
+  reasoningButton?.setAttribute("aria-pressed", String(reasoningEnabled));
+  const label = reasoningButton?.querySelector("span");
+  if (label) label.textContent = reasoningEnabled ? "Reasoning on" : "Reasoning";
+}
+
+reasoningButton?.addEventListener("click", () => {
+  if (!reasoningEnabled) {
+    reasoningPreviousMode = modelMode?.value || "auto";
+    if (modelMode) modelMode.value = "advanced";
+    if (modelModeSettings) modelModeSettings.value = "advanced";
+  } else if (modelMode) {
+    modelMode.value = reasoningPreviousMode;
+    if (modelModeSettings) modelModeSettings.value = reasoningPreviousMode;
+  }
+  reasoningEnabled = !reasoningEnabled;
+  localStorage.setItem("jarvis_reasoning_enabled", String(reasoningEnabled));
+  if (reasoningEnabled && modelMode) {
+    reasoningPreviousMode = modelMode.value;
+    modelMode.value = "advanced";
+    if (modelModeSettings) modelModeSettings.value = "advanced";
+  }
+  updateReasoningButton();
+});
+
+updateReasoningButton();
+window.addEventListener("resize", () => {
+  if (!window.matchMedia("(max-width: 700px)").matches) {
+    setSidebarOpen(true);
+  }
+});
+
+function setWelcomeVisible(visible) {
+  welcomeEl?.classList.toggle("hidden", !visible);
+}
+
+function resizeComposerInput() {
+  const styles = getComputedStyle(input);
+  const lineHeight = Number.parseFloat(styles.lineHeight) || 21;
+  const verticalPadding =
+    Number.parseFloat(styles.paddingTop) + Number.parseFloat(styles.paddingBottom);
+  const rows = Math.ceil((input.scrollHeight - verticalPadding) / lineHeight);
+  input.rows = Math.max(1, Math.min(6, rows));
+}
 
 function setAssistantState(state, label) {
   if (orbStage) orbStage.dataset.state = state;
@@ -133,11 +318,12 @@ function setAssistantState(state, label) {
 }
 
 function setVoiceStatus(message, state = "") {
-  voiceStatusText.textContent = message;
-  voiceStatus.className = `voice-status ${state}`.trim();
+  if (voiceStatusText) voiceStatusText.textContent = message;
+  if (voiceStatus) voiceStatus.className = `composer-status voice-status ${state}`.trim();
 }
 
 function updateWakeWordButton(starting = false) {
+  if (!wakeWordToggle) return;
   wakeWordToggle.textContent = starting
     ? "Starting…"
     : !wakeWordEnabled
@@ -487,7 +673,7 @@ function stopWakeWordAfterPlayback() {
   if (wakeWordEnabled) void resumeWakeWordListener();
 }
 
-wakeWordToggle.addEventListener("click", toggleWakeWord);
+wakeWordToggle?.addEventListener("click", toggleWakeWord);
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && wakeCaptureMode && isRecording) {
@@ -505,6 +691,11 @@ document.addEventListener("visibilitychange", () => {
 function setBusy(busy) {
   isBusy = busy;
   sendButton.disabled = busy;
+  addAttachmentButton.disabled = busy;
+  attachmentInput.disabled = busy;
+  attachmentList.querySelectorAll("button").forEach(button => {
+    button.disabled = busy;
+  });
   micButton.disabled = busy;
   if (!busy && !isRecording) {
     micIcon.innerHTML = '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-4 0h8"/>';
@@ -525,8 +716,7 @@ async function copyResponseToClipboard(text) {
   const field = document.createElement("textarea");
   field.value = text;
   field.setAttribute("readonly", "");
-  field.style.position = "fixed";
-  field.style.opacity = "0";
+  field.className = "clipboard-fallback-field";
   document.body.append(field);
   field.focus();
   field.select();
@@ -541,6 +731,146 @@ async function copyResponseToClipboard(text) {
   if (!copied) throw new Error("Clipboard access is unavailable in this browser.");
 }
 
+function getAttachmentDetails(file) {
+  if (
+    file.name.includes("/")
+    || file.name.includes("\\")
+    || /[\u0000-\u001f]/.test(file.name)
+  ) {
+    throw new Error("Attachment filenames must be plain filenames.");
+  }
+  const extension = file.name.includes(".")
+    ? file.name.slice(file.name.lastIndexOf(".")).toLowerCase()
+    : "";
+  const imageTypes = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp"
+  };
+  const textExtensions = new Set([
+    ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".xml", ".log"
+  ]);
+  if (imageTypes[extension]) {
+    if (file.type && file.type !== imageTypes[extension]) {
+      throw new Error(`${file.name} does not match its image extension.`);
+    }
+    return { kind: "image", mime: imageTypes[extension] };
+  }
+  if (textExtensions.has(extension)) return { kind: "text", mime: file.type || "text/plain" };
+  throw new Error(`${file.name} is not a supported image or text document.`);
+}
+
+function renderAttachmentList(error = "") {
+  attachmentList.replaceChildren();
+  if (error) {
+    const errorLabel = document.createElement("span");
+    errorLabel.className = "attachment-error";
+    errorLabel.textContent = error;
+    attachmentList.append(errorLabel);
+  }
+  selectedAttachments.forEach(({ file, kind, thumbnail }) => {
+    const chip = document.createElement("span");
+    chip.className = "attachment-chip";
+    if (kind === "image" && thumbnail) {
+      const previewButton = document.createElement("button");
+      previewButton.type = "button";
+      previewButton.className = "attachment-preview-button";
+      previewButton.setAttribute("aria-label", `Preview image: ${file.name}`);
+      const preview = document.createElement("img");
+      preview.className = "attachment-preview";
+      preview.src = `data:image/jpeg;base64,${thumbnail}`;
+      preview.alt = "";
+      previewButton.append(preview);
+      previewButton.addEventListener("click", () => {
+        openImagePreview(URL.createObjectURL(file), file.name, previewButton, true);
+      });
+      chip.append(previewButton);
+    }
+    const name = document.createElement("span");
+    name.textContent = file.name;
+    name.title = file.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove ${file.name}`);
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      selectedAttachments = selectedAttachments.filter(item => item.file !== file);
+      renderAttachmentList();
+    });
+    chip.append(name, remove);
+    attachmentList.append(chip);
+  });
+}
+
+async function createImageThumbnail(file) {
+  let bitmap = null;
+  let objectUrl = null;
+  try {
+    if (typeof createImageBitmap === "function") {
+      try {
+        bitmap = await createImageBitmap(file);
+      } catch {
+        bitmap = null;
+      }
+    }
+    let source = bitmap;
+    if (!source) {
+      objectUrl = URL.createObjectURL(file);
+      source = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error(`Could not preview ${file.name}.`));
+        image.src = objectUrl;
+      });
+    }
+    const width = source.width || source.naturalWidth;
+    const height = source.height || source.naturalHeight;
+    if (width * height > 40_000_000) {
+      throw new Error(`${file.name} has too many pixels to preview safely.`);
+    }
+    let scale = Math.min(1, 1280 / width, 960 / height);
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Could not create an image preview.");
+    while (true) {
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(source, 0, 0, canvas.width, canvas.height);
+      const thumbnail = canvas.toDataURL("image/jpeg", 0.82).split(",", 2)[1] || "";
+      if (thumbnail.length <= 128 * 1024 || (canvas.width === 1 && canvas.height === 1)) {
+        return thumbnail;
+      }
+      scale *= 0.8;
+    }
+  } finally {
+    bitmap?.close();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function prepareAttachments(files) {
+  return Promise.all(files.map(async ({ file, kind, mime, thumbnailPromise }) => {
+    let content;
+    let thumbnail = "";
+    if (kind === "image") {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+        reader.readAsDataURL(file);
+      });
+      content = String(dataUrl).split(",", 2)[1] || "";
+      thumbnail = await thumbnailPromise;
+    } else {
+      content = await file.text();
+    }
+    return { name: file.name, kind, mime, content, thumbnail };
+  }));
+}
+
 function addMessage(
   role,
   content,
@@ -548,9 +878,11 @@ function addMessage(
   tier = null,
   reason = null,
   sourcePrompt = null,
-  canRegenerate = false
+  canRegenerate = false,
+  thinking = "",
+  attachments = []
 ) {
-  welcomeEl.style.display = "none";
+  setWelcomeVisible(false);
 
   const wrapper = document.createElement("div");
   wrapper.className = `message ${role}`;
@@ -565,14 +897,66 @@ function addMessage(
   const label = document.createElement("div");
   label.className = "message-label";
   label.textContent = role === "assistant"
-    ? `JARVIS${model ? ` · ${model}` : ""}`
+    ? (model || "JARVIS")
     : "YOU";
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   bubble.textContent = content;
 
-  contentWrap.append(label, bubble);
+  contentWrap.append(label);
+
+  if (role === "user" && attachments.length) {
+    const attachmentBadges = document.createElement("div");
+    attachmentBadges.className = "message-attachments";
+    attachments.forEach(attachment => {
+      if (attachment.kind === "image" && attachment.thumbnail) {
+        const previewButton = document.createElement("button");
+        previewButton.type = "button";
+        previewButton.className = "message-image-preview-button";
+        previewButton.setAttribute("aria-label", `Preview image: ${attachment.name}`);
+        const preview = document.createElement("img");
+        preview.className = "message-image-preview";
+        preview.src = `data:image/jpeg;base64,${attachment.thumbnail}`;
+        preview.alt = "";
+        preview.title = attachment.name;
+        previewButton.append(preview);
+        previewButton.addEventListener("click", () => {
+          const src = attachment.content && attachment.mime
+            ? `data:${attachment.mime};base64,${attachment.content}`
+            : `data:image/jpeg;base64,${attachment.thumbnail}`;
+          openImagePreview(src, attachment.name, previewButton);
+        });
+        attachmentBadges.append(previewButton);
+      } else {
+        const badge = document.createElement("span");
+        badge.className = "message-attachment";
+        badge.textContent = attachment.name;
+        attachmentBadges.append(badge);
+      }
+    });
+    contentWrap.append(attachmentBadges);
+  }
+
+  if (role === "assistant" && thinking) {
+    const thinkingDetails = document.createElement("details");
+    thinkingDetails.className = "thinking-dropdown";
+
+    const thinkingSummary = document.createElement("summary");
+    thinkingSummary.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>' +
+      '<span>Thinking</span>' +
+      '<svg class="thinking-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>';
+
+    const thinkingBody = document.createElement("div");
+    thinkingBody.className = "thinking-content";
+    thinkingBody.textContent = thinking;
+
+    thinkingDetails.append(thinkingSummary, thinkingBody);
+    contentWrap.append(thinkingDetails);
+  }
+
+  contentWrap.append(bubble);
 
   if (role === "assistant" && reason) {
     const meta = document.createElement("div");
@@ -588,7 +972,7 @@ function addMessage(
     const speakButton = document.createElement("button");
     speakButton.type = "button";
     speakButton.className = "message-action-button";
-    speakButton.textContent = "Speak";
+    speakButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Zm4.5 3.5a5 5 0 0 1 0 7M18 6a8 8 0 0 1 0 12"/></svg>';
     speakButton.setAttribute("aria-label", "Speak this response aloud");
     speakButton.addEventListener("click", () => {
       if (wakeWordActive) {
@@ -604,14 +988,14 @@ function addMessage(
     const copyButton = document.createElement("button");
     copyButton.type = "button";
     copyButton.className = "message-action-button";
-    copyButton.textContent = "Copy";
+    copyButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>';
     copyButton.setAttribute("aria-label", "Copy this response");
     copyButton.addEventListener("click", async () => {
       try {
         await copyResponseToClipboard(content);
-        copyButton.textContent = "Copied";
+        copyButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
         setTimeout(() => {
-          copyButton.textContent = "Copy";
+          copyButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>';
         }, 1500);
       } catch (error) {
         console.error("Could not copy response:", error);
@@ -624,7 +1008,7 @@ function addMessage(
       const redoButton = document.createElement("button");
       redoButton.type = "button";
       redoButton.className = "message-action-button";
-      redoButton.textContent = "Redo";
+      redoButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5"/><path d="M18.5 16A8 8 0 1 1 20 11"/></svg>';
       redoButton.setAttribute("aria-label", "Regenerate this response");
       redoButton.addEventListener("click", () => {
         void sendMessage(sourcePrompt, {
@@ -641,6 +1025,41 @@ function addMessage(
   wrapper.append(avatar, contentWrap);
   messagesEl.appendChild(wrapper);
   wrapper.scrollIntoView({ behavior: "smooth", block: "end" });
+  return wrapper;
+}
+
+function createStreamingMessage() {
+  setWelcomeVisible(false);
+  const wrapper = document.createElement("div");
+  wrapper.className = "message assistant";
+
+  const contentWrap = document.createElement("div");
+  contentWrap.className = "message-content";
+
+  const label = document.createElement("div");
+  label.className = "message-label";
+  label.textContent = "JARVIS";
+
+  const thinkingDetails = document.createElement("details");
+  thinkingDetails.className = "thinking-dropdown";
+  thinkingDetails.hidden = true;
+  const thinkingSummary = document.createElement("summary");
+  thinkingSummary.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>' +
+    "<span>Thinking</span>" +
+    '<svg class="thinking-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>';
+  const thinkingContent = document.createElement("div");
+  thinkingContent.className = "thinking-content";
+  thinkingDetails.append(thinkingSummary, thinkingContent);
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  contentWrap.append(label, thinkingDetails, bubble);
+  wrapper.append(contentWrap);
+  messagesEl.append(wrapper);
+  wrapper.scrollIntoView({ behavior: "smooth", block: "end" });
+
+  return { wrapper, label, thinkingDetails, thinkingContent, bubble };
 }
 
 function showTyping() {
@@ -648,7 +1067,7 @@ function showTyping() {
   const el = document.createElement("div");
   el.id = "typing-indicator";
   el.className = "typing";
-  el.textContent = "JARVIS is thinking…";
+  el.textContent = "Thinking";
   messagesEl.appendChild(el);
   el.scrollIntoView({ behavior: "smooth", block: "end" });
 }
@@ -658,6 +1077,7 @@ function hideTyping() {
 }
 
 function loadSpeechVoices() {
+  if (!speechVoiceSelect) return;
   if (!("speechSynthesis" in window)) return;
   speechVoices = window.speechSynthesis.getVoices();
   const selectedVoice = localStorage.getItem(SPEECH_VOICE_KEY) || "";
@@ -676,6 +1096,7 @@ function loadSpeechVoices() {
 
 function getPreferredSpeechVoice(language) {
   loadSpeechVoices();
+  if (!speechVoiceSelect) return null;
   const selectedVoiceUri = speechVoiceSelect.value;
   if (!selectedVoiceUri) return null;
 
@@ -728,7 +1149,7 @@ if ("speechSynthesis" in window) {
   loadSpeechVoices();
   window.speechSynthesis.onvoiceschanged = loadSpeechVoices;
 }
-speechVoiceSelect.addEventListener("change", () => {
+speechVoiceSelect?.addEventListener("change", () => {
   localStorage.setItem(SPEECH_VOICE_KEY, speechVoiceSelect.value);
 });
 
@@ -738,24 +1159,24 @@ async function checkHealth() {
     const data = await response.json();
 
     if (data.status === "ok") {
-      statusDot.classList.add("online");
-      connectionLabel.textContent = "Ollama online";
-      modelLabel.textContent =
+      statusDot?.classList.add("online");
+      if (connectionLabel) connectionLabel.textContent = "Ollama online";
+      if (modelLabel) modelLabel.textContent =
         `Fast: ${data.fast_model_available ? "ready" : "missing"} · ` +
         `Advanced: ${data.advanced_model_available ? "ready" : "missing"}`;
     } else if (data.status === "models_missing") {
-      statusDot.classList.remove("online");
-      connectionLabel.textContent = "Models not installed";
-      modelLabel.textContent = `Run ollama pull ${data.fast_model || "the configured model"}`;
+      statusDot?.classList.remove("online");
+      if (connectionLabel) connectionLabel.textContent = "Models not installed";
+      if (modelLabel) modelLabel.textContent = `Run ollama pull ${data.fast_model || "the configured model"}`;
     } else {
-      statusDot.classList.remove("online");
-      connectionLabel.textContent = "Ollama offline";
-      modelLabel.textContent = data.detail || "Open Ollama";
+      statusDot?.classList.remove("online");
+      if (connectionLabel) connectionLabel.textContent = "Ollama offline";
+      if (modelLabel) modelLabel.textContent = data.detail || "Open Ollama";
     }
   } catch (error) {
-    statusDot.classList.remove("online");
-    connectionLabel.textContent = "Backend unavailable";
-    modelLabel.textContent = "Start the JARVIS server";
+    statusDot?.classList.remove("online");
+    if (connectionLabel) connectionLabel.textContent = "Backend unavailable";
+    if (modelLabel) modelLabel.textContent = "Start the JARVIS server";
   }
 }
 
@@ -766,7 +1187,7 @@ async function loadModelOptions() {
 
     const data = await response.json();
     for (const model of data.models) {
-      const option = modelMode.querySelector(`option[value="${model.id}"]`);
+      const option = modelMode?.querySelector(`option[value="${model.id}"]`);
       if (option) option.textContent = model.label;
     }
   } catch (error) {
@@ -783,12 +1204,22 @@ async function loadHistory() {
     if (requestedSessionId !== sessionId) return;
 
     if (Array.isArray(data.messages) && data.messages.length) {
-      welcomeEl.style.display = "none";
+      setWelcomeVisible(false);
       let sourcePrompt = null;
       data.messages.forEach((message, index) => {
         if (message.role === "user") {
           sourcePrompt = message.content;
-          addMessage(message.role, message.content, message.model);
+          addMessage(
+            message.role,
+            message.content,
+            message.model,
+            null,
+            null,
+            null,
+            false,
+            "",
+            message.attachments || []
+          );
           return;
         }
         addMessage(
@@ -854,8 +1285,10 @@ async function openConversation(nextSessionId) {
   sessionId = nextSessionId;
   localStorage.setItem(SESSION_KEY, sessionId);
   messagesEl.replaceChildren();
-  welcomeEl.style.display = "flex";
+  setWelcomeVisible(true);
   input.value = "";
+  selectedAttachments = [];
+  renderAttachmentList();
   setAssistantState("idle", "Standing by for your command");
   setVoiceStatus("Microphone ready · English and Russian");
   await loadHistory();
@@ -864,60 +1297,139 @@ async function openConversation(nextSessionId) {
 
 async function sendMessage(message, options = {}) {
   const cleanMessage = (message || "").trim();
-  if (!cleanMessage || isBusy) return;
+  const pendingAttachments = options.regenerate ? [] : selectedAttachments;
+  if ((!cleanMessage && !pendingAttachments.length) || isBusy) return;
+  const displayMessage = cleanMessage || "Please analyze the attached file(s).";
 
   const fromVoice = options.fromVoice === true;
   const regenerate = options.regenerate === true;
-  if (!regenerate) {
-    addMessage("user", cleanMessage);
-    input.value = "";
-    input.style.height = "auto";
-  }
 
   setBusy(true);
   setAssistantState("thinking", fromVoice ? "I heard you. Thinking…" : "Working on your request");
   if (fromVoice) setVoiceStatus("Sending your voice message to JARVIS…", "processing");
   showTyping();
 
+  let streamingMessage = null;
   try {
-    const response = await fetch("/api/chat", {
+    const requestAttachments = await prepareAttachments(pendingAttachments);
+    const supportsPersistedPreviews = await attachmentPreviewSupport;
+    const attachmentsForRequest = supportsPersistedPreviews
+      ? requestAttachments
+      : requestAttachments.map(({ thumbnail, ...attachment }) => attachment);
+    if (!regenerate) {
+      addMessage(
+        "user",
+        displayMessage,
+        null,
+        null,
+        null,
+        null,
+        false,
+        "",
+        requestAttachments.map(({ name, kind, mime, thumbnail }) => ({
+          name,
+          kind,
+          mime,
+          thumbnail
+        }))
+      );
+      input.value = "";
+      input.rows = 1;
+    }
+
+    const response = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         session_id: sessionId,
         message: cleanMessage,
-        model_mode: modelMode.value,
-        regenerate
+        model_mode: modelMode?.value || "auto",
+        reasoning: reasoningEnabled,
+        regenerate,
+        attachments: attachmentsForRequest
       })
     });
 
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      throw new Error(`The server returned an invalid response (${response.status}).`);
-    }
-
-    hideTyping();
-
     if (!response.ok) {
-      throw new Error(data.detail || "JARVIS could not process that request.");
+      let errorData = {};
+      try {
+        errorData = await response.json();
+      } catch {
+        throw new Error(`The server returned an invalid response (${response.status}).`);
+      }
+      const detail = Array.isArray(errorData.detail)
+        ? errorData.detail.map(item => item.msg).join(" ")
+        : errorData.detail;
+      throw new Error(detail || "JARVIS could not process that request.");
     }
 
+    if (!response.body) throw new Error("Streaming is unavailable in this browser.");
+    hideTyping();
+    streamingMessage = createStreamingMessage();
+    let responseData = null;
+    let buffer = "";
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        if (event.type === "meta") {
+          streamingMessage.label.textContent = event.model || "JARVIS";
+        } else if (event.type === "thinking") {
+          streamingMessage.thinkingDetails.hidden = false;
+          streamingMessage.thinkingContent.textContent += event.text;
+        } else if (event.type === "content") {
+          streamingMessage.bubble.textContent += event.text;
+        } else if (event.type === "done") {
+          responseData = event;
+        } else if (event.type === "error") {
+          throw new Error(event.detail || "JARVIS could not complete the response.");
+        }
+      }
+    }
+
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      const event = JSON.parse(buffer);
+      if (event.type === "done") responseData = event;
+      else if (event.type === "error") throw new Error(event.detail || "JARVIS could not complete the response.");
+      else if (event.type === "content") streamingMessage.bubble.textContent += event.text;
+      else if (event.type === "thinking") {
+        streamingMessage.thinkingDetails.hidden = false;
+        streamingMessage.thinkingContent.textContent += event.text;
+      }
+    }
+
+    if (!responseData) throw new Error("The response stream ended unexpectedly.");
     if (regenerate) options.responseElement?.remove();
+    streamingMessage.wrapper.remove();
     addMessage(
       "assistant",
-      data.reply,
-      data.model,
-      data.tier,
-      data.routing_reason,
+      responseData.reply,
+      responseData.model,
+      responseData.tier,
+      responseData.routing_reason,
       cleanMessage,
-      true
+      true,
+      responseData.thinking || ""
     );
+    if (!regenerate) {
+      selectedAttachments = [];
+      renderAttachmentList();
+    }
     setVoiceStatus(fromVoice ? "Voice message sent · JARVIS replied" : "Ready · English and Russian voice input", "success");
-    if (fromVoice) speakReply(data.reply);
+    if (fromVoice) speakReply(responseData.reply);
   } catch (error) {
     hideTyping();
+    streamingMessage?.wrapper.remove();
     addMessage("assistant", `I encountered a problem: ${error.message}`);
     setVoiceStatus(error.message, "error");
     setAssistantState("idle", "Something went wrong · try again");
@@ -934,13 +1446,55 @@ async function sendMessage(message, options = {}) {
 form.addEventListener("submit", async event => {
   event.preventDefault();
   const message = input.value.trim();
-  if (!message || isBusy) return;
+  if ((!message && !selectedAttachments.length) || isBusy) return;
   await sendMessage(message);
 });
 
+addAttachmentButton.addEventListener("click", () => {
+  renderAttachmentList();
+  attachmentInput.click();
+});
+attachmentInput.addEventListener("change", () => {
+  const files = Array.from(attachmentInput.files || []);
+  attachmentInput.value = "";
+  if (!files.length) return;
+
+  try {
+    const additions = files.map(file => ({ file, ...getAttachmentDetails(file) }));
+    const next = [...selectedAttachments, ...additions];
+    if (next.length > 5) throw new Error("Attach at most five files per message.");
+    const imageBytes = next
+      .filter(item => item.kind === "image")
+      .reduce((total, item) => total + item.file.size, 0);
+    const textBytes = next
+      .filter(item => item.kind === "text")
+      .reduce((total, item) => total + item.file.size, 0);
+    if (imageBytes > 8 * 1024 * 1024) throw new Error("Images may total at most 8 MB.");
+    if (textBytes > 500 * 1024) throw new Error("Text documents may total at most 500 KB.");
+    selectedAttachments = next;
+    renderAttachmentList();
+    additions
+      .filter(item => item.kind === "image")
+      .forEach(item => {
+        item.thumbnailPromise = createImageThumbnail(item.file)
+          .then(thumbnail => {
+            item.thumbnail = thumbnail;
+            renderAttachmentList();
+            return thumbnail;
+          })
+          .catch(error => {
+            renderAttachmentList(error.message);
+            throw error;
+          });
+        item.thumbnailPromise.catch(() => {});
+      });
+  } catch (error) {
+    renderAttachmentList(error.message);
+  }
+});
+
 input.addEventListener("input", () => {
-  input.style.height = "auto";
-  input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+  resizeComposerInput();
 });
 
 input.addEventListener("keydown", event => {
@@ -969,10 +1523,12 @@ function startNewConversation() {
   sessionId = createSessionId();
   localStorage.setItem(SESSION_KEY, sessionId);
   messagesEl.replaceChildren();
-  welcomeEl.style.display = "flex";
+  setWelcomeVisible(true);
   setAssistantState("idle", "Standing by for your command");
   setVoiceStatus("Microphone ready · English and Russian");
   input.value = "";
+  selectedAttachments = [];
+  renderAttachmentList();
   input.focus();
   refreshRecentChats();
 }
@@ -988,7 +1544,9 @@ document.getElementById("clear-chat").addEventListener("click", async () => {
     if (!response.ok) throw new Error("Could not clear conversation history.");
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     messagesEl.replaceChildren();
-    welcomeEl.style.display = "flex";
+    setWelcomeVisible(true);
+    selectedAttachments = [];
+    renderAttachmentList();
     setAssistantState("idle", "Standing by for your command");
     setVoiceStatus("Conversation cleared");
     await refreshRecentChats();

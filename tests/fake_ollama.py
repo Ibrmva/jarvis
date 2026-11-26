@@ -12,7 +12,7 @@ Run standalone for a live server check:
 
 In-process use:
 
-    url, server, stop = serve(["qwen3:1.7b", "qwen3:4b"])
+    url, server, stop = serve()
     ...
     server.requests   # every parsed POST body, for assertions
     stop()
@@ -22,10 +22,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
-DEFAULT_MODELS = ("qwen3:1.7b", "qwen3:4b")
+from dotenv import dotenv_values
+
+
+def configured_models() -> tuple[str, str]:
+    env_values = dotenv_values(Path(__file__).resolve().parents[1] / ".env")
+    fast_model = os.getenv("FAST_MODEL") or env_values.get("FAST_MODEL")
+    advanced_model = os.getenv("ADVANCED_MODEL") or env_values.get("ADVANCED_MODEL")
+    return (
+        fast_model or "fast-test-model",
+        advanced_model or "advanced-test-model",
+    )
+
+
+DEFAULT_MODELS = configured_models()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -48,6 +63,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_stream(self, chunks: list[dict]) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for chunk in chunks:
+            body = (json.dumps(chunk) + "\n").encode("utf-8")
+            self.wfile.write(f"{len(body):X}\r\n".encode("ascii") + body + b"\r\n")
+            self.wfile.flush()
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
     def do_GET(self):
         if self.path == "/api/tags":
@@ -79,16 +106,32 @@ class _Handler(BaseHTTPRequestHandler):
 
         users = [m for m in payload.get("messages", []) if m.get("role") == "user"]
         last = users[-1]["content"][:60] if users else ""
-        self._send(
-            {
-                "model": model,
-                "message": {
-                    "role": "assistant",
-                    "content": f"Fake reply from {model} about: {last}",
-                },
-                "done": True,
-            }
-        )
+        reply = f"Fake reply from {model} about: {last}"
+        if payload.get("stream"):
+            chunks = []
+            if payload.get("think"):
+                chunks.append(
+                    {"message": {"thinking": "Fake reasoning trace"}, "done": False}
+                )
+            chunks.extend(
+                [
+                    {"message": {"content": reply[:20]}, "done": False},
+                    {"message": {"content": reply[20:]}, "done": False},
+                    {"message": {}, "done": True},
+                ]
+            )
+            self._send_stream(chunks)
+        else:
+            self._send(
+                {
+                    "model": model,
+                    "message": {
+                        "role": "assistant",
+                        "content": reply,
+                    },
+                    "done": True,
+                }
+            )
 
 
 class FakeOllama(ThreadingHTTPServer):

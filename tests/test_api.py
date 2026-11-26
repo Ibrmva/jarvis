@@ -5,6 +5,8 @@ macOS command intercept, degradation when a model is missing) without needing a
 GPU, a whisper binary or Ollama installed.
 """
 
+import base64
+import json
 import unittest
 import uuid
 from unittest.mock import AsyncMock, patch
@@ -12,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 from tests import support  # noqa: F401  (import side effects: paths + fake Ollama)
 
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 import backend.main as main  # noqa: E402
 from backend.config import ADVANCED_MODEL, FAST_MODEL, NUM_CTX  # noqa: E402
@@ -21,6 +24,7 @@ class ApiTests(unittest.TestCase):
     def setUp(self):
         support.reset_db()
         support.reset_fake_requests()
+        support.FAKE_SERVER.models = [FAST_MODEL, ADVANCED_MODEL]
         self.client = TestClient(main.app)
         self.client.__enter__()
         self.session_id = str(uuid.uuid4())
@@ -51,6 +55,132 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(upstream["options"]["num_ctx"], NUM_CTX)
         self.assertIn("keep_alive", upstream)
         self.assertEqual(upstream["messages"][0]["role"], "system")
+
+    def test_streaming_route_emits_chunks_and_persists_final_reply(self):
+        response = self.client.post(
+            "/api/chat/stream",
+            json={
+                "session_id": self.session_id,
+                "message": "hello streaming",
+                "model_mode": "advanced",
+                "reasoning": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        events = [json.loads(line) for line in response.text.splitlines()]
+        self.assertEqual(events[0]["type"], "meta")
+        self.assertEqual([event["type"] for event in events].count("content"), 2)
+        self.assertEqual([event["type"] for event in events].count("thinking"), 1)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertIn("Fake reply from", events[-1]["reply"])
+        self.assertEqual(events[-1]["thinking"], "Fake reasoning trace")
+        self.assertTrue(support.fake_requests()[-1]["think"])
+        self.assertTrue(support.fake_requests()[-1]["stream"])
+
+        history_response = self.client.get(f"/api/history/{self.session_id}")
+        self.assertEqual(history_response.headers["cache-control"], "no-store")
+        history = history_response.json()["messages"]
+        self.assertEqual([message["role"] for message in history], ["user", "assistant"])
+        self.assertEqual(history[-1]["content"], events[-1]["reply"])
+
+    def test_streaming_route_handles_persisted_image_and_text_attachments(self):
+        image = base64.b64encode(b"\x89PNG\r\n\x1a\nfake-image-data").decode("ascii")
+        thumbnail = base64.b64encode(
+            b"\xff\xd8\xff" + b"x" * (96 * 1024 - 3)
+        ).decode("ascii")
+        attachments = [
+            {
+                "name": "notes.txt",
+                "kind": "text",
+                "mime": "text/plain",
+                "content": "Project deadline is Friday.",
+            },
+            {
+                "name": "diagram.png",
+                "kind": "image",
+                "mime": "image/png",
+                "content": image,
+                "thumbnail": thumbnail,
+            },
+        ]
+        response = self.client.post(
+            "/api/chat/stream",
+            json={
+                "session_id": self.session_id,
+                "message": "",
+                "model_mode": "fast",
+                "attachments": attachments,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        upstream_user = [
+            message
+            for message in support.fake_requests()[-1]["messages"]
+            if message["role"] == "user"
+        ][-1]
+        self.assertIn("Project deadline is Friday.", upstream_user["content"])
+        self.assertIn("Please analyze the attached file(s).", upstream_user["content"])
+        self.assertEqual(upstream_user["images"], [image])
+
+        history = self.client.get(f"/api/history/{self.session_id}").json()["messages"]
+        user_message = history[0]
+        self.assertEqual(
+            [item["name"] for item in user_message["attachments"]],
+            ["notes.txt", "diagram.png"],
+        )
+        self.assertNotIn("content", user_message["attachments"][0])
+        self.assertNotIn(image, json.dumps(history))
+        self.assertEqual(user_message["attachments"][1]["thumbnail"], thumbnail)
+
+        self.client.post(
+            "/api/chat",
+            json={
+                "session_id": self.session_id,
+                "message": "When is the deadline?",
+                "model_mode": "fast",
+            },
+        )
+        followup_user = [
+            message
+            for message in support.fake_requests()[-1]["messages"]
+            if message["role"] == "user"
+        ]
+        self.assertIn("Project deadline is Friday.", followup_user[0]["content"])
+        self.assertEqual(followup_user[0]["images"], [image])
+
+    def test_attachment_image_content_must_match_declared_type(self):
+        response = self.client.post(
+            "/api/chat/stream",
+            json={
+                "session_id": self.session_id,
+                "message": "Describe this",
+                "attachments": [
+                    {
+                        "name": "not-an-image.png",
+                        "kind": "image",
+                        "mime": "image/png",
+                        "content": base64.b64encode(b"not an image").decode("ascii"),
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(support.fake_requests(), [])
+
+    def test_chat_rejects_unknown_fields_instead_of_silently_ignoring_them(self):
+        response = self.client.post(
+            "/api/chat/stream",
+            json={
+                "session_id": self.session_id,
+                "message": "Describe this",
+                "attachments": [],
+                "unexpected": True,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
 
     def test_advanced_route_for_code(self):
         response = self.client.post(
@@ -284,6 +414,45 @@ class ApiTests(unittest.TestCase):
                 websocket.send_bytes(b"\0\0" * 1280)
                 self.assertEqual(websocket.receive_json(), {"type": "wake"})
         reset_model.assert_called_once_with()
+
+    def test_wake_word_rejects_cross_origin_websocket(self):
+        with self.assertRaises(WebSocketDisconnect):
+            with self.client.websocket_connect(
+                "/api/wake-word",
+                headers={"origin": "https://attacker.example"},
+            ):
+                pass
+
+    def test_audio_upload_limit_is_checked_before_transcription(self):
+        with patch.object(main, "MAX_AUDIO_SIZE", 4), patch.object(
+            main, "transcribe_audio"
+        ) as transcribe:
+            response = self.client.post(
+                "/api/transcribe",
+                files={"audio": ("recording.wav", b"12345", "audio/wav")},
+            )
+
+        self.assertEqual(response.status_code, 413)
+        transcribe.assert_not_called()
+
+    def test_http_responses_include_security_headers(self):
+        response = self.client.get("/")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertIn("frame-ancestors 'none'", response.headers["content-security-policy"])
+
+    def test_chat_rejects_cross_origin_post(self):
+        response = self.client.post(
+            "/api/chat",
+            headers={"origin": "https://attacker.example"},
+            json={
+                "session_id": self.session_id,
+                "message": "hello",
+                "model_mode": "fast",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(support.fake_requests(), [])
 
     def test_sessions_endpoint_lists_created_session(self):
         self.client.post(

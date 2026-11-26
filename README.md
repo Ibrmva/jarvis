@@ -4,8 +4,9 @@ JARVIS is a local-first personal AI assistant. Phase 2 routes requests between t
 
 ## Features
 
-- **Auto mode:** routes everyday requests to `qwen3:1.7b` and coding / reasoning / long requests to `qwen3:4b`. Routing is signal-scored, not a single keyword hit, and every response carries the reason it took that route.
+- **Auto mode:** routes everyday requests to the `FAST_MODEL` configured in `.env` and coding / reasoning / long requests to `ADVANCED_MODEL`. Routing is signal-scored, not a single keyword hit, and every response carries the reason it took that route.
 - **Manual Fast and Advanced modes** in the interface. A manual choice always wins over the router.
+- **Local attachments:** attach JPEG, PNG, or WebP images and plain-text documents (`.txt`, `.md`, `.csv`, `.json`, `.yaml`, `.xml`, `.log`) to a chat. Attachments are validated, stored with the local conversation, and included in later model context; image understanding depends on the selected Ollama model supporting vision.
 - **One conversation across models:** both tiers receive the same recent history, so switching tiers does not start a new chat. Each stored message keeps the `model` that produced it.
 - **Voice in, voice out:** `/api/transcribe` runs `whisper-cli` (whisper.cpp) locally for speech-to-text; replies are spoken with the browser's `speechSynthesis`. Assistant responses can be spoken or copied, and the latest response can be regenerated from its message controls.
 - **Optional wake word:** enable **Hey JARVIS** in the sidebar for local, always-on wake-word detection. When detected, JARVIS gives a brief spoken greeting, then listens for your request; it is sent after 1.2 seconds of silence. If no speech follows within 8 seconds, JARVIS discards the empty capture and listens again. Wake-word detection pauses while JARVIS transcribes and replies, then resumes. The browser streams microphone frames only to the local backend, and the detector model is downloaded on first use. Listening is off by default and pauses when the browser tab is backgrounded.
@@ -58,13 +59,7 @@ cp .env.example .env          # every value in it is the code default
 ./scripts/fetch_models.sh     # ~57 MB whisper model, checksum verified
 ```
 
-Install both models if needed:
-
-```bash
-ollama pull qwen3:1.7b
-ollama pull qwen3:4b
-ollama list
-```
+Install each model ID configured by `FAST_MODEL` and `ADVANCED_MODEL` in `.env` with `ollama pull <model-id>`, then verify them with `ollama list`.
 
 Start JARVIS:
 
@@ -74,13 +69,17 @@ uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 
 Open http://127.0.0.1:8000
 
-To access JARVIS from another device on your private network, bind it to the network interfaces and open `http://<your-computer's-LAN-IP>:8000` on that device:
+To access JARVIS from another device on your private network, bind it to the network interfaces. Plain HTTP is fine for chat, but mobile browsers block microphone access on HTTP LAN addresses. To use the microphone, configure HTTPS with a certificate trusted by the phone:
 
 ```bash
 JARVIS_HOST=0.0.0.0 ./scripts/setup.sh
 ```
 
-If starting Uvicorn manually, use `--host 0.0.0.0` instead of `--host 127.0.0.1`. Find the computer's LAN IP in its network settings. The API has no authentication, so only do this on a trusted private network; never port-forward it or expose it to the internet. Microphone and wake-word access from other devices may also require HTTPS, depending on the browser.
+JARVIS does not provide user authentication. Keep LAN access on a trusted private network, use a firewall, and never expose the service directly to the public internet. HTTPS protects traffic in transit; it does not replace authentication.
+
+One option for a private LAN is [mkcert](https://github.com/FiloSottile/mkcert): install it on the computer, then run `mkcert -install`, `mkdir -p certs`, and `mkcert -cert-file certs/jarvis.pem -key-file certs/jarvis-key.pem <your-computer's-LAN-IP>`. Set `JARVIS_SSL_CERTFILE=./certs/jarvis.pem` and `JARVIS_SSL_KEYFILE=./certs/jarvis-key.pem` in `.env`. Install mkcert's `rootCA.pem` (from `mkcert -CAROOT`) on the phone and trust it; never copy or share `rootCA-key.pem`. The certificate must include the address you open on your phone. Restart setup and open `https://<your-computer's-LAN-IP>:8000`. A self-signed certificate that the phone does not trust will not enable microphone access.
+
+If starting Uvicorn manually, pass `--host 0.0.0.0 --ssl-certfile <certificate> --ssl-keyfile <private-key>`. The API has no authentication, so only make it reachable on a trusted private network; never port-forward it or expose it to the internet.
 
 ## Configuration
 
@@ -89,8 +88,8 @@ All settings come from `.env` (see `.env.example`); the defaults live in `backen
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama endpoint |
-| `FAST_MODEL` | `qwen3:1.7b` | fast tier |
-| `ADVANCED_MODEL` | `qwen3:4b` | advanced tier |
+| `FAST_MODEL` | `.env` value | fast tier |
+| `ADVANCED_MODEL` | `.env` value | advanced tier |
 | `DATABASE_PATH` | `./data/jarvis.db` | SQLite file |
 | `MAX_HISTORY_MESSAGES` | `20` | turns replayed to the model |
 | `REQUEST_TIMEOUT_SECONDS` | `240` | `/api/chat` timeout |
@@ -127,13 +126,13 @@ OLLAMA_BASE_URL=http://127.0.0.1:11500 uvicorn backend.main:app --port 8000
 ## Test routing
 
 1. Keep `Auto — JARVIS decides` selected.
-2. Send: `What is the difference between a list and a tuple in Python?` Expected route: `qwen3:1.7b`.
+2. Send: `What is the difference between a list and a tuple in Python?` Expected route: the configured fast model.
 3. Send: `Review this Python code and explain how to refactor it for better performance: ```python
 def f(x): return sorted(set(x))
-``` ` Expected route: `qwen3:4b`.
-4. Send: `Explain the class system in Victorian Britain in two sentences.` Expected route: `qwen3:1.7b` — prose mentioning "class" must not escalate.
-5. Select `Fast` manually and send a complex request. It should still use `qwen3:1.7b`.
-6. Select `Advanced` manually. It should use `qwen3:4b` or clearly tell you (HTTP 409) if it is not installed.
+``` ` Expected route: the configured advanced model.
+4. Send: `Explain the class system in Victorian Britain in two sentences.` Expected route: the configured fast model — prose mentioning "class" must not escalate.
+5. Select `Fast` manually and send a complex request. It should still use the configured fast model.
+6. Select `Advanced` manually. It should use the configured advanced model or clearly tell you (HTTP 409) if it is not installed.
 7. Ask a follow-up referring to the previous answer. The conversation should remain continuous after a model change.
 
 ## Memory note
@@ -146,7 +145,7 @@ def f(x): return sorted(set(x))
 - No automatic RAM telemetry or idle-model watchdog yet.
 - No cloud provider integration; cloud support is a later opt-in milestone with an explicit consent step.
 - The optional Hey JARVIS detector recognizes English wake phrases and requires the browser tab to remain open; mobile browsers may suspend it while backgrounded.
-- `stream:false` and a fixed `num_predict=512`: long answers are truncated and there is no token streaming in the UI yet.
+- Chat output streams from Ollama into the UI, including reasoning traces when enabled. The legacy `/api/chat` endpoint remains non-streaming for JSON clients; the UI uses `/api/chat/stream`.
 - Command execution and the `whisper-cli` lookup are macOS-shaped (`open -a`, `/opt/homebrew/bin`).
 
 ## Layout
